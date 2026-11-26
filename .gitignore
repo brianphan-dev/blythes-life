@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode & SwiftPM
+.build/
+.build-*/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserdata
+*.xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.xcresult
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Environment & Secrets (NEVER commit!)
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pem
+*.key
+secrets/
+
+# Private Scans, Fixtures & Local Databases
+*.jpg
+*.jpeg
+*.heic
+*.png
+!ios/BlythesLifeApp/Assets.xcassets/**/*.png
+*.pdf
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

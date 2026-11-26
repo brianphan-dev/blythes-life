@@ -1,0 +1,41 @@
+<!-- @dsCard group="Components" viewport="700x810" name="Tracking" subtitle="NapCard, NursingTimer, GlanceStat, QuickTile, EventRow, EventIcon, DraftCard" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Tracking</title>
+<link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../card.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+const NS = window.BlytheSLifeDesignSystem_420b07;
+const { NapCard, NursingTimer, GlanceStat, QuickTile, EventRow, DraftCard } = NS;
+function Demo() {
+  const [inc, setInc] = React.useState(true);
+  const [time, setTime] = React.useState(null);
+  const [side, setSide] = React.useState('left');
+  return (
+    <div className="g2">
+      <div className="col">
+        <NapCard state="awake" label="Awake · since 10:32 AM" elapsed="2h 22m" progress={0.73} caption={<span>Nap 2 sweet spot <b>1:47 PM</b> · in 53m</span>} actionLabel="Start nap" secondaryLabel="Add a past sleep" />
+        <div className="g2" style={{ gap: 8 }}>
+          <GlanceStat type="feeding" label="Last bottle" value="2h 9m" sub="2.5 oz breast milk" />
+          <GlanceStat type="diaper" label="Last diaper" value="34m" sub="Pee M" />
+        </div>
+        <NursingTimer left={252} right={95} active={side} onSide={s => setSide(side === s ? null : s)} />
+        <div className="grid4">{['feeding', 'nursing', 'pump', 'diaper', 'meal', 'bath', 'medicine', 'note'].map(t => <QuickTile key={t} size="sm" type={t} label={t === 'medicine' ? 'Meds' : undefined} />)}</div>
+      </div>
+      <div className="col">
+        <NapCard state="asleep" label="Nap 2 · since 1:50 PM" elapsed="48m" progress={0.53} caption={<span>Nap cap <b>3:20 PM</b> · 42m left</span>} actionLabel="Wake up" />
+        <div>
+          <EventRow type="feeding" time="10:45 AM" title="Bottle" detail="2.5 oz breast milk" source="paper_scan" />
+          <EventRow type="nursing" time="6:50 AM" title="Nursing" detail="12m · Left side" />
+          <EventRow type="pump" time="9:45 AM" title="Pump" detail="4.5 oz · Both sides" />
+        </div>
+        <DraftCard type="diaper" time={time || '11:20 AM'} title="Diaper" detail="Pee L" included={inc} onToggle={setInc} selected ambiguity={time ? null : 'The time was written over. Which is it?'} options={['11:20 AM', '11:30 AM']} onResolve={setTime} />
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+</script></body></html>

@@ -1,0 +1,60 @@
+:root{
+/* Paper neutrals — warm, hue 85→70 */
+--paper-0:oklch(0.995 0.004 85);--paper-50:oklch(0.975 0.01 85);--paper-100:oklch(0.95 0.014 85);--paper-200:oklch(0.915 0.016 85);--paper-300:oklch(0.86 0.018 85);--paper-400:oklch(0.72 0.018 80);--paper-500:oklch(0.54 0.018 75);--paper-600:oklch(0.46 0.018 70);--paper-700:oklch(0.36 0.018 70);--paper-800:oklch(0.27 0.016 70);--paper-900:oklch(0.2 0.014 70);--paper-950:oklch(0.15 0.01 70);
+/* Night neutrals — OLED black up */
+--night-0:#000;--night-50:oklch(0.12 0.006 80);--night-100:oklch(0.16 0.008 80);--night-200:oklch(0.2 0.01 80);--night-300:oklch(0.25 0.012 80);--night-400:oklch(0.34 0.014 80);--night-500:oklch(0.56 0.025 80);--night-600:oklch(0.68 0.03 82);--night-700:oklch(0.86 0.035 85);
+/* Honey — brand accent */
+--honey-100:oklch(0.96 0.045 90);--honey-200:oklch(0.92 0.08 88);--honey-300:oklch(0.87 0.12 86);--honey-400:oklch(0.82 0.145 82);--honey-500:oklch(0.77 0.15 78);--honey-600:oklch(0.66 0.14 70);--honey-700:oklch(0.52 0.115 65);--honey-800:oklch(0.4 0.085 62);--honey-900:oklch(0.26 0.05 80);
+/* Event hues — shared lightness/chroma steps: 100 tint, 300 night ink, 500 solid, 700 ink, 900 night tint */
+--sleep-100:oklch(0.94 0.035 285);--sleep-300:oklch(0.8 0.08 285);--sleep-500:oklch(0.62 0.12 285);--sleep-700:oklch(0.42 0.11 285);--sleep-900:oklch(0.26 0.06 285);
+--feeding-100:oklch(0.94 0.04 50);--feeding-300:oklch(0.8 0.09 50);--feeding-500:oklch(0.68 0.13 50);--feeding-700:oklch(0.45 0.11 45);--feeding-900:oklch(0.26 0.05 50);
+--diaper-100:oklch(0.94 0.035 200);--diaper-300:oklch(0.8 0.075 200);--diaper-500:oklch(0.64 0.095 200);--diaper-700:oklch(0.42 0.075 205);--diaper-900:oklch(0.26 0.045 200);
+--meal-100:oklch(0.94 0.045 145);--meal-300:oklch(0.8 0.09 145);--meal-500:oklch(0.64 0.12 145);--meal-700:oklch(0.42 0.095 148);--meal-900:oklch(0.26 0.05 145);
+--bath-100:oklch(0.94 0.03 245);--bath-300:oklch(0.8 0.075 245);--bath-500:oklch(0.63 0.11 245);--bath-700:oklch(0.42 0.1 250);--bath-900:oklch(0.26 0.05 245);
+--medicine-100:oklch(0.94 0.035 345);--medicine-300:oklch(0.8 0.085 345);--medicine-500:oklch(0.64 0.13 345);--medicine-700:oklch(0.43 0.12 348);--medicine-900:oklch(0.26 0.055 345);
+--pump-100:oklch(0.94 0.035 315);--pump-300:oklch(0.8 0.085 315);--pump-500:oklch(0.63 0.13 315);--pump-700:oklch(0.43 0.12 315);--pump-900:oklch(0.26 0.055 315);
+/* Status */
+--amber-100:oklch(0.95 0.06 75);--amber-500:oklch(0.74 0.16 62);--amber-700:oklch(0.47 0.12 55);--amber-900:oklch(0.27 0.06 65);--amber-300:oklch(0.82 0.12 70);
+--green-100:oklch(0.94 0.045 155);--green-500:oklch(0.62 0.13 155);--green-700:oklch(0.42 0.1 155);--green-900:oklch(0.26 0.05 155);--green-300:oklch(0.8 0.09 155);
+--red-100:oklch(0.94 0.035 25);--red-500:oklch(0.6 0.18 25);--red-700:oklch(0.45 0.15 25);--red-900:oklch(0.27 0.07 25);--red-300:oklch(0.8 0.1 25);
+
+/* Semantic — day (default) */
+--bg-app:var(--paper-50);--bg-surface:var(--paper-0);--bg-sunken:var(--paper-100);--bg-raised:var(--paper-0);
+--border-hairline:var(--paper-200);--border-strong:var(--paper-300);
+--text-primary:var(--paper-900);--text-secondary:var(--paper-600);--text-tertiary:var(--paper-500);--text-on-accent:var(--paper-900);
+--accent:var(--honey-400);--accent-pressed:var(--honey-500);--accent-soft:var(--honey-100);--accent-border:var(--honey-500);--accent-text:var(--honey-700);
+--scrim:oklch(0.2 0.014 70 / .38);
+--toast-bg:var(--paper-900);--toast-fg:var(--paper-50);--toast-action:var(--honey-300);
+--ev-sleep-tint:var(--sleep-100);--ev-sleep-solid:var(--sleep-500);--ev-sleep-ink:var(--sleep-700);
+--ev-feeding-tint:var(--feeding-100);--ev-feeding-solid:var(--feeding-500);--ev-feeding-ink:var(--feeding-700);
+--ev-diaper-tint:var(--diaper-100);--ev-diaper-solid:var(--diaper-500);--ev-diaper-ink:var(--diaper-700);
+--ev-meal-tint:var(--meal-100);--ev-meal-solid:var(--meal-500);--ev-meal-ink:var(--meal-700);
+--ev-bath-tint:var(--bath-100);--ev-bath-solid:var(--bath-500);--ev-bath-ink:var(--bath-700);
+--ev-medicine-tint:var(--medicine-100);--ev-medicine-solid:var(--medicine-500);--ev-medicine-ink:var(--medicine-700);
+--ev-pump-tint:var(--pump-100);--ev-pump-solid:var(--pump-500);--ev-pump-ink:var(--pump-700);
+--ev-note-tint:var(--paper-100);--ev-note-solid:var(--paper-500);--ev-note-ink:var(--paper-700);
+--warn-tint:var(--amber-100);--warn-solid:var(--amber-500);--warn-ink:var(--amber-700);
+--ok-tint:var(--green-100);--ok-solid:var(--green-500);--ok-ink:var(--green-700);
+--danger-tint:var(--red-100);--danger-solid:var(--red-500);--danger-ink:var(--red-700);
+}
+/* Semantic — night (OLED, warm low-blue). Apply data-theme="night" to any container. */
+[data-theme="night"]{
+--bg-app:var(--night-0);--bg-surface:var(--night-100);--bg-sunken:var(--night-50);--bg-raised:var(--night-200);
+--border-hairline:var(--night-300);--border-strong:var(--night-400);
+--text-primary:var(--night-700);--text-secondary:var(--night-600);--text-tertiary:var(--night-500);--text-on-accent:var(--paper-950);
+--accent:var(--honey-600);--accent-pressed:var(--honey-700);--accent-soft:var(--honey-900);--accent-border:var(--honey-700);--accent-text:var(--honey-400);
+--scrim:oklch(0 0 0 / .62);
+--toast-bg:var(--night-300);--toast-fg:var(--night-700);--toast-action:var(--honey-400);
+--ev-sleep-tint:var(--sleep-900);--ev-sleep-ink:var(--sleep-300);
+--ev-feeding-tint:var(--feeding-900);--ev-feeding-ink:var(--feeding-300);
+--ev-diaper-tint:var(--diaper-900);--ev-diaper-ink:var(--diaper-300);
+--ev-meal-tint:var(--meal-900);--ev-meal-ink:var(--meal-300);
+--ev-bath-tint:var(--bath-900);--ev-bath-ink:var(--bath-300);
+--ev-medicine-tint:var(--medicine-900);--ev-medicine-ink:var(--medicine-300);
+--ev-pump-tint:var(--pump-900);--ev-pump-ink:var(--pump-300);
+--ev-note-tint:var(--night-200);--ev-note-solid:var(--night-500);--ev-note-ink:var(--night-600);
+--warn-tint:var(--amber-900);--warn-ink:var(--amber-300);
+--ok-tint:var(--green-900);--ok-ink:var(--green-300);
+--danger-tint:var(--red-900);--danger-ink:var(--red-300);
+--shadow-sheet:0 0 0 1px var(--night-400);--shadow-float:0 0 0 1px var(--night-400);
+}

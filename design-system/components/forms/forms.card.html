@@ -1,0 +1,43 @@
+<!-- @dsCard group="Components" viewport="700x440" name="Forms" subtitle="SegmentedControl, Switch, Checkbox, TextField, AmountField, TimeField" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Forms</title>
+<link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../card.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+const NS = window.BlytheSLifeDesignSystem_420b07;
+const { SegmentedControl, Switch, Checkbox, TextField, AmountField, TimeField, Chip } = NS;
+function Demo() {
+  const [pee, setPee] = React.useState('M');
+  const [unit, setUnit] = React.useState('oz');
+  const [sub, setSub] = React.useState('Formula');
+  const [on, setOn] = React.useState(true);
+  const [vitd, setVitd] = React.useState(true);
+  const [amt, setAmt] = React.useState('3.25');
+  const [ate, setAte] = React.useState('');
+  const [start, setStart] = React.useState('09:15');
+  const [end, setEnd] = React.useState('10:32');
+  return (
+    <div className="g2">
+      <div className="col">
+        <AmountField value={amt} onChange={setAmt} unit={unit} />
+        <SegmentedControl block size="lg" options={['Formula', 'Breast milk', 'Mixed']} value={sub} onChange={setSub} />
+        <Checkbox checked={vitd} onChange={setVitd} label="+ Vitamin D" sub="Logs a supplement alongside this bottle" />
+        <TextField label="What she ate" placeholder="Optional" value={ate} onChange={setAte} />
+      </div>
+      <div className="col">
+        <span className="bl-label">Pee</span>
+        <SegmentedControl block size="lg" options={['None', 'S', 'M', 'L']} value={pee} onChange={setPee} />
+        <div className="r"><SegmentedControl options={['oz', 'mL']} value={unit} onChange={setUnit} /><SegmentedControl size="sm" options={['oz', 'mL']} value={unit} onChange={setUnit} /><Switch checked={on} onChange={setOn} label="Night mode" /><Switch checked={!on} onChange={v => setOn(!v)} label="Off" /></div>
+        <Checkbox checked={!vitd} onChange={v => setVitd(!v)} label="Rash" />
+        <AmountField size="md" value="2.5" unit="mL" onChange={() => {}} />
+        <div className="g2" style={{ gap: 12 }}><TimeField label="Start" value={start} onChange={setStart} /><TimeField label="End" value={end} onChange={setEnd} /></div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+</script></body></html>

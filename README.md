@@ -6,6 +6,41 @@
 
 ---
 
+## Repository Structure & Running Locally
+
+```text
+blythes-life/
+├── design-system/   # Canonical Design System (OKLCH tokens, Day/OLED Night, components, interactive UI kit)
+├── shared/          # BlythesLifeShared — pure Swift 6 models, sync DTOs, VLM schemas & domain logic
+└── ios/             # Universal SwiftUI app for iPhone, iPhone Duo, and iPad
+    ├── BlythesLife.xcodeproj   # Universal iOS/iPadOS Xcode project (Swift 6 strict concurrency)
+    ├── BlythesLifeApp/         # App entry point, Info.plist, and Assets.xcassets
+    └── BlythesLifeAppKit/      # Local SwiftPM package: BlythesLifeDesignSystem, BlythesLifeCore, BlythesLifeUI
+```
+
+> **Private Backend Repository:** The self-hosted Swift 6 API server, Docker Compose stack, OpenTofu IaC, and SOPS-encrypted secrets live in the separate private **`blythes-life-backend`** repository. Private real-world paper log fixtures are never committed to git.
+
+### Quick Start
+
+```bash
+# 1. Run pure Swift 6 shared model & domain tests
+swift test --package-path shared
+
+# 2. Run iOS kit unit tests (Design System & Core)
+swift test --package-path ios/BlythesLifeAppKit
+
+# 3. Build the universal iOS/iPadOS app for iOS Simulator (no signing team required)
+xcodebuild -project ios/BlythesLife.xcodeproj \
+  -scheme BlythesLife \
+  -destination 'generic/platform=iOS Simulator' \
+  build
+
+# Or open directly in Xcode to run on Simulator / Device:
+open ios/BlythesLife.xcodeproj
+```
+
+---
+
 ## 1. Product Vision & Goals
 
 **Blythe's Life** is a fast, calm, offline-first family baby-tracking app built around two core goals:

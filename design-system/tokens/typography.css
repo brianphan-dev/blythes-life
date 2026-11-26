@@ -1,0 +1,19 @@
+:root{
+--font-display:"Newsreader","Iowan Old Style",Georgia,serif;
+--font-ui:"Figtree",-apple-system,system-ui,sans-serif;
+--fs-timer:56px;--fs-display:34px;--fs-title:24px;--fs-headline:17px;--fs-body:17px;--fs-callout:15px;--fs-caption:13px;--fs-micro:11px;
+--fw-regular:400; /* @kind font */
+--fw-medium:500; /* @kind font */
+--fw-semibold:600; /* @kind font */
+--fw-bold:700; /* @kind font */
+--tracking-micro:.08em;--tracking-display:-.015em;
+/* Composite roles (font shorthand) */
+--type-timer:400 56px/1 var(--font-display);
+--type-display:500 34px/40px var(--font-display);
+--type-title:500 24px/30px var(--font-display);
+--type-headline:600 17px/22px var(--font-ui);
+--type-body:400 17px/24px var(--font-ui);
+--type-callout:500 15px/20px var(--font-ui);
+--type-caption:400 13px/18px var(--font-ui);
+--type-micro:600 11px/14px var(--font-ui);
+}

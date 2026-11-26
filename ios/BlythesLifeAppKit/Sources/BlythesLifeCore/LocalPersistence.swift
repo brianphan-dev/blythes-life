@@ -145,6 +145,8 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
     public var authEmail: String?
     public var displayName: String?
     public var isSignedInWithApple: Bool
+    public var hasCompletedHouseholdSetup: Bool
+    public var isDemoPreview: Bool
 
     public init(
         profile: ProfileDTO,
@@ -160,7 +162,9 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         colorMode: AppColorModePreference = .day,
         authEmail: String? = nil,
         displayName: String? = nil,
-        isSignedInWithApple: Bool = true
+        isSignedInWithApple: Bool = true,
+        hasCompletedHouseholdSetup: Bool = true,
+        isDemoPreview: Bool = false
     ) {
         self.profile = profile
         self.household = household
@@ -176,6 +180,47 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         self.authEmail = authEmail
         self.displayName = displayName
         self.isSignedInWithApple = isSignedInWithApple
+        self.hasCompletedHouseholdSetup = hasCompletedHouseholdSetup
+        self.isDemoPreview = isDemoPreview
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case profile
+        case household
+        case currentUserId
+        case events
+        case activeNapStart
+        case activeNursingSession
+        case pendingScans
+        case outbox
+        case serverWatermark
+        case preferredUnit
+        case colorMode
+        case authEmail
+        case displayName
+        case isSignedInWithApple
+        case hasCompletedHouseholdSetup
+        case isDemoPreview
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.profile = try container.decode(ProfileDTO.self, forKey: .profile)
+        self.household = try container.decode(HouseholdDTO.self, forKey: .household)
+        self.currentUserId = try container.decode(UUID.self, forKey: .currentUserId)
+        self.events = try container.decodeIfPresent([EventDTO].self, forKey: .events) ?? []
+        self.activeNapStart = try container.decodeIfPresent(Date.self, forKey: .activeNapStart)
+        self.activeNursingSession = try container.decodeIfPresent(ActiveNursingSession.self, forKey: .activeNursingSession)
+        self.pendingScans = try container.decodeIfPresent([ScannedSheetRecord].self, forKey: .pendingScans) ?? []
+        self.outbox = try container.decodeIfPresent([SyncOutboxItem].self, forKey: .outbox) ?? []
+        self.serverWatermark = try container.decodeIfPresent(Date.self, forKey: .serverWatermark)
+        self.preferredUnit = try container.decodeIfPresent(VolumeUnit.self, forKey: .preferredUnit) ?? .oz
+        self.colorMode = try container.decodeIfPresent(AppColorModePreference.self, forKey: .colorMode) ?? .day
+        self.authEmail = try container.decodeIfPresent(String.self, forKey: .authEmail)
+        self.displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
+        self.isSignedInWithApple = try container.decodeIfPresent(Bool.self, forKey: .isSignedInWithApple) ?? false
+        self.hasCompletedHouseholdSetup = try container.decodeIfPresent(Bool.self, forKey: .hasCompletedHouseholdSetup) ?? true
+        self.isDemoPreview = try container.decodeIfPresent(Bool.self, forKey: .isDemoPreview) ?? false
     }
 }
 

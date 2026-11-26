@@ -166,64 +166,68 @@ private struct BlythesLifeRootShell: View {
         ZStack {
             theme.bgApp.ignoresSafeArea()
 
-            // Primary posture chrome
-            switch duoLayout.posture {
-            case .duoTabletop(let hingeRect):
-                TabletopNightstandView(
-                    store: store,
-                    hingeRect: hingeRect,
-                    onOpenLog: openLogSheet
-                )
-
-            case .iPadRegular:
-                iPadWorkspace
-
-            case .compactPhone, .duoFolded, .duoUnfolded:
-                tabbedWorkspace
-            }
-
-            // Full-screen Scan Review & Confirm overlay
-            if let sheet = reviewingSheet {
-                ScanReviewView(
-                    sheet: sheet,
-                    store: store,
-                    onCancel: {
-                        withAnimation(BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion)) {
-                            reviewingSheet = nil
-                        }
-                    },
-                    onComplete: {
-                        withAnimation(BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion)) {
-                            reviewingSheet = nil
-                        }
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(20)
-            }
-
-            // Daily-care LogSheet overlay
-            if let request = activeSheet {
-                ZStack(alignment: .bottom) {
-                    if duoLayout.usesSplitLayout {
-                        theme.scrim
-                            .ignoresSafeArea()
-                            .onTapGesture { activeSheet = nil }
-                    }
-                    LogSheetView(
+            if store.sessionStage != .ready {
+                OnboardingView(store: store)
+            } else {
+                // Primary posture chrome
+                switch duoLayout.posture {
+                case .duoTabletop(let hingeRect):
+                    TabletopNightstandView(
                         store: store,
-                        request: request,
-                        showScrim: !duoLayout.usesSplitLayout,
-                        onClose: { activeSheet = nil }
+                        hingeRect: hingeRect,
+                        onOpenLog: openLogSheet
                     )
-                    .id(request.id)
-                    .frame(maxWidth: duoLayout.usesSplitLayout ? 540 : .infinity)
+
+                case .iPadRegular:
+                    iPadWorkspace
+
+                case .compactPhone, .duoFolded, .duoUnfolded:
+                    tabbedWorkspace
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .zIndex(30)
+
+                // Full-screen Scan Review & Confirm overlay
+                if let sheet = reviewingSheet {
+                    ScanReviewView(
+                        sheet: sheet,
+                        store: store,
+                        onCancel: {
+                            withAnimation(BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion)) {
+                                reviewingSheet = nil
+                            }
+                        },
+                        onComplete: {
+                            withAnimation(BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion)) {
+                                reviewingSheet = nil
+                            }
+                        }
+                    )
+                    .transition(.opacity)
+                    .zIndex(20)
+                }
+
+                // Daily-care LogSheet overlay
+                if let request = activeSheet {
+                    ZStack(alignment: .bottom) {
+                        if duoLayout.usesSplitLayout {
+                            theme.scrim
+                                .ignoresSafeArea()
+                                .onTapGesture { activeSheet = nil }
+                        }
+                        LogSheetView(
+                            store: store,
+                            request: request,
+                            showScrim: !duoLayout.usesSplitLayout,
+                            onClose: { activeSheet = nil }
+                        )
+                        .id(request.id)
+                        .frame(maxWidth: duoLayout.usesSplitLayout ? 540 : .infinity)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .zIndex(30)
+                }
             }
 
-            // Floating Undo confirmation toast
+            // Floating Undo confirmation toast (active across onboarding and main workspace)
             if let toast = store.toast {
                 VStack {
                     Spacer()
@@ -239,6 +243,13 @@ private struct BlythesLifeRootShell: View {
                 }
                 .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 .zIndex(40)
+            }
+        }
+        .onChange(of: store.sessionStage) { _, newStage in
+            if newStage != .ready {
+                activeSheet = nil
+                reviewingSheet = nil
+                selectedTab = .today
             }
         }
         .animation(
@@ -452,6 +463,9 @@ private struct BlythesLifeRootShell: View {
     }
 
     private var toastBottomInset: CGFloat {
+        if store.sessionStage != .ready {
+            return BLSpacing.space5
+        }
         if duoLayout.isTabletop || duoLayout.isPad {
             return BLSpacing.space5
         }
@@ -463,28 +477,34 @@ private struct BlythesLifeRootShell: View {
     }
 
     private var syncStatusTitle: String {
+        if store.isDemoPreview {
+            return "Sample preview"
+        }
         switch store.syncStatus {
         case .localOnly:
-            "Local preview"
+            return "Local preview"
         case .synced:
-            "Updated on every device"
+            return "Updated on every device"
         case .syncing:
-            "Updating…"
+            return "Updating…"
         case .offline(let pendingCount):
-            "Offline · \(pendingCount) waiting"
+            return "Offline · \(pendingCount) waiting"
         case .error:
-            "Needs a look"
+            return "Needs a look"
         }
     }
 
     private var syncStatusColor: Color {
+        if store.isDemoPreview {
+            return theme.textSecondary
+        }
         switch store.syncStatus {
         case .synced:
-            theme.ok.ink
+            return theme.ok.ink
         case .offline, .error:
-            theme.warn.ink
+            return theme.warn.ink
         case .localOnly, .syncing:
-            theme.textSecondary
+            return theme.textSecondary
         }
     }
 }

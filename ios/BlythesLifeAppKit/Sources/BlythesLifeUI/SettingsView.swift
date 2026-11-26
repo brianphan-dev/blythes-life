@@ -42,6 +42,7 @@ public struct SettingsView: View {
 
     private let store: BlythesLifeStore
 
+    @State private var isBabyProfileSheetOpen = false
     @State private var isScheduleSheetOpen = false
     @State private var isMembersSheetOpen = false
     @State private var isJoinHouseholdSheetOpen = false
@@ -71,6 +72,7 @@ public struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             headerView
                                 .padding(.horizontal, -BLSpacing.screenGutter)
+                            babyProfileGroup
                             napScheduleGroup
                             loggingGroup
                             posturePreviewGroup
@@ -101,6 +103,7 @@ public struct SettingsView: View {
 
                         ScrollView {
                             VStack(alignment: .leading, spacing: 0) {
+                                babyProfileGroup
                                 napScheduleGroup
                                 loggingGroup
                                 posturePreviewGroup
@@ -117,6 +120,22 @@ public struct SettingsView: View {
                 }
             )
             .background(theme.bgApp)
+
+            if isBabyProfileSheetOpen {
+                BabyProfileEditorSheet(
+                    initialName: store.profile.displayName,
+                    initialBirthDate: Self.parseISOBirthDate(store.profile.birthDate),
+                    onClose: { isBabyProfileSheetOpen = false },
+                    onSave: { displayName, birthDate in
+                        try await store.updateBabyProfileAsync(
+                            displayName: displayName,
+                            birthDate: birthDate
+                        )
+                        isBabyProfileSheetOpen = false
+                    }
+                )
+                .zIndex(10)
+            }
 
             if isScheduleSheetOpen {
                 NapScheduleEditorSheet(
@@ -206,6 +225,29 @@ public struct SettingsView: View {
     }
 
     // MARK: - Settings Groups
+
+    private var babyProfileGroup: some View {
+        settingsGroup(title: "Baby profile") {
+            BLCard(isFlush: true) {
+                VStack(spacing: 0) {
+                    BLListRow(
+                        label: "Name",
+                        value: store.profile.displayName,
+                        showsChevron: true,
+                        onTap: { isBabyProfileSheetOpen = true }
+                    )
+                    BLListRow(
+                        label: "Birth date",
+                        detail: store.profileAgeLabel.isEmpty ? nil : store.profileAgeLabel,
+                        value: formattedBirthDateDisplay,
+                        showsChevron: true,
+                        showDivider: false,
+                        onTap: { isBabyProfileSheetOpen = true }
+                    )
+                }
+            }
+        }
+    }
 
     private var napScheduleGroup: some View {
         let config = store.profile.scheduleConfig
@@ -377,14 +419,29 @@ public struct SettingsView: View {
     }
 
     private var accountGroup: some View {
-        settingsGroup(title: "Account") {
+        let showsDeleteAccount = !store.isDemoPreview
+        let connectionShowsDivider = store.isSignedInWithApple || showsDeleteAccount
+
+        return settingsGroup(title: "Account") {
             BLCard(isFlush: true) {
                 VStack(spacing: 0) {
+                    if store.isDemoPreview {
+                        BLListRow(
+                            label: "Sample preview",
+                            detail: "Showing example entries locally. Exit to sign in with Apple."
+                        ) {
+                            BLButton("Exit preview", variant: .secondary, size: .sm) {
+                                store.exitDemoPreview()
+                            }
+                        }
+                    }
+
                     appleSignInSection
 
                     BLListRow(
                         label: connectionStatusTitle,
-                        detail: connectionStatusDetail
+                        detail: connectionStatusDetail,
+                        showDivider: connectionShowsDivider
                     ) {
                         BLButton(
                             isCheckingConnection
@@ -402,6 +459,7 @@ public struct SettingsView: View {
                         BLListRow(
                             label: isSigningOut ? "Signing out…" : "Sign out",
                             isDanger: true,
+                            showDivider: showsDeleteAccount,
                             onTap: {
                                 signOutOnThisDevice()
                             }
@@ -410,17 +468,19 @@ public struct SettingsView: View {
                         .opacity(isSigningOut ? 0.5 : 1.0)
                     }
 
-                    BLListRow(
-                        label: isDeletingAccount ? "Deleting account…" : "Delete account",
-                        detail: "Removes your account and entries on every device",
-                        isDanger: true,
-                        showDivider: false,
-                        onTap: {
-                            isDeleteAccountAlertOpen = true
-                        }
-                    )
-                    .disabled(isDeletingAccount || isSigningOut)
-                    .opacity(isDeletingAccount ? 0.5 : 1.0)
+                    if showsDeleteAccount {
+                        BLListRow(
+                            label: isDeletingAccount ? "Deleting account…" : "Delete account",
+                            detail: "Removes your account and entries on every device",
+                            isDanger: true,
+                            showDivider: false,
+                            onTap: {
+                                isDeleteAccountAlertOpen = true
+                            }
+                        )
+                        .disabled(isDeletingAccount || isSigningOut)
+                        .opacity(isDeletingAccount ? 0.5 : 1.0)
+                    }
                 }
             }
         }
@@ -452,6 +512,7 @@ public struct SettingsView: View {
                 } onCompletion: { result in
                     handleAppleSignIn(result)
                 }
+                .id(colorMode)
                 .signInWithAppleButtonStyle(colorMode == .night ? .white : .black)
                 .frame(height: 48)
                 .clipShape(RoundedRectangle(cornerRadius: BLRadius.md, style: .continuous))
@@ -520,22 +581,52 @@ public struct SettingsView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    private var formattedBirthDateDisplay: String {
+        guard let date = Self.parseISOBirthDate(store.profile.birthDate) else {
+            return "Not set"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: date)
+    }
+
+    private static func parseISOBirthDate(_ raw: String?) -> Date? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: trimmed)
+    }
+
     private var connectionStatusTitle: String {
+        if store.isDemoPreview {
+            return "Sample preview"
+        }
         switch store.syncStatus {
         case .synced:
-            "Updated on every device"
+            return "Updated on every device"
         case .syncing:
-            "Updating…"
+            return "Updating…"
         case .offline(let pendingCount):
-            "Offline · \(pendingCount) waiting"
+            return "Offline · \(pendingCount) waiting"
         case .localOnly:
-            "Local preview"
+            return "Local preview"
         case .error:
-            "Needs a look"
+            return "Needs a look"
         }
     }
 
     private var connectionStatusDetail: String {
+        if store.isDemoPreview {
+            return "Example entries on this device only"
+        }
         switch store.syncStatus {
         case .synced(let date):
             let clock = FormattingHelpers.formatClock(date, timeZone: store.profileTimeZone)
@@ -1028,6 +1119,148 @@ private struct JoinHouseholdSheet: View {
             defer { isSubmitting = false }
             do {
                 try await onJoin(code, optionalName)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+// MARK: - Baby Profile Editor Sheet
+
+@MainActor
+private struct BabyProfileEditorSheet: View {
+    @Environment(\.blTheme) private var theme
+
+    let onClose: () -> Void
+    let onSave: @MainActor (String, Date?) async throws -> Void
+
+    @State private var babyName: String
+    @State private var hasBirthDate: Bool
+    @State private var selectedBirthDate: Date
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+
+    init(
+        initialName: String,
+        initialBirthDate: Date?,
+        onClose: @escaping () -> Void,
+        onSave: @escaping @MainActor (String, Date?) async throws -> Void
+    ) {
+        self.onClose = onClose
+        self.onSave = onSave
+        _babyName = State(initialValue: initialName)
+        _hasBirthDate = State(initialValue: initialBirthDate != nil)
+        let today = Date()
+        _selectedBirthDate = State(initialValue: min(initialBirthDate ?? today, today))
+    }
+
+    private var trimmedName: String {
+        babyName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSave: Bool {
+        !trimmedName.isEmpty && !isSaving
+    }
+
+    var body: some View {
+        BLSheetContainer(
+            isPresented: true,
+            title: "Baby profile",
+            showScrim: true,
+            onClose: onClose,
+            content: {
+                babyNameField
+
+                VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                    HStack(spacing: BLSpacing.space3) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Include birth date")
+                                .blTextRole(.body)
+                                .foregroundStyle(theme.textPrimary)
+                            Text("Used to show age on the Today screen")
+                                .blTextRole(.caption)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        BLSwitch(isOn: $hasBirthDate, label: "Include birth date")
+                    }
+
+                    if hasBirthDate {
+                        HStack(spacing: BLSpacing.space3) {
+                            Text("Birth date")
+                                .blMicroLabel()
+                            Spacer()
+                            DatePicker(
+                                "Birth date",
+                                selection: $selectedBirthDate,
+                                in: ...Date(),
+                                displayedComponents: .date
+                            )
+                            .labelsHidden()
+                            .datePickerStyle(.compact)
+                            .tint(theme.accent)
+                        }
+                        .padding(.vertical, BLSpacing.space2)
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 48)
+                        .background(
+                            RoundedRectangle(cornerRadius: BLRadius.md, style: .continuous)
+                                .fill(theme.bgSurface)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: BLRadius.md, style: .continuous)
+                                .strokeBorder(theme.borderStrong, lineWidth: BLSpacing.borderWidth)
+                        )
+                    }
+                }
+
+                if let errorMessage, !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.danger.ink)
+                }
+            },
+            footer: {
+                BLButton(
+                    isSaving ? "Saving…" : "Save profile",
+                    variant: .primary,
+                    size: .lg,
+                    isBlock: true
+                ) {
+                    submit()
+                }
+                .disabled(!canSave)
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var babyNameField: some View {
+        let field = BLTextField(
+            label: "Baby's name",
+            placeholder: "e.g. Blythe",
+            text: $babyName
+        )
+        #if os(iOS)
+        field.textInputAutocapitalization(.words)
+        #else
+        field
+        #endif
+    }
+
+    private func submit() {
+        guard canSave else { return }
+        errorMessage = nil
+        isSaving = true
+        let name = trimmedName
+        let birthDate = hasBirthDate ? selectedBirthDate : nil
+
+        Task { @MainActor in
+            defer { isSaving = false }
+            do {
+                try await onSave(name, birthDate)
             } catch {
                 errorMessage = error.localizedDescription
             }

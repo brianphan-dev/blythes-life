@@ -100,7 +100,60 @@ public enum SampleSeedData: Sendable {
             colorMode: .day,
             authEmail: "brian@icloud.com",
             displayName: "Brian",
-            isSignedInWithApple: true
+            isSignedInWithApple: true,
+            hasCompletedHouseholdSetup: true,
+            isDemoPreview: true
+        )
+    }
+
+    /// Clean empty fresh-install state with zero sample events, scans, or outbox items.
+    public static func makeBlankState(
+        referenceDate: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> PersistedAppState {
+        let placeholderUserId = UUID()
+        let placeholderHouseholdId = UUID()
+        let placeholderProfileId = UUID()
+
+        let household = HouseholdDTO(
+            id: placeholderHouseholdId,
+            name: "Blythe's household",
+            inviteCode: nil,
+            inviteExpiresAt: nil,
+            createdBy: placeholderUserId,
+            createdAt: referenceDate,
+            role: .owner,
+            members: []
+        )
+
+        let profile = ProfileDTO(
+            id: placeholderProfileId,
+            householdId: placeholderHouseholdId,
+            displayName: "Blythe",
+            birthDate: nil,
+            defaultTimezone: timeZone.identifier,
+            scheduleConfig: ScheduleConfig(),
+            createdAt: referenceDate,
+            updatedAt: referenceDate
+        )
+
+        return PersistedAppState(
+            profile: profile,
+            household: household,
+            currentUserId: placeholderUserId,
+            events: [],
+            activeNapStart: nil,
+            activeNursingSession: nil,
+            pendingScans: [],
+            outbox: [],
+            serverWatermark: nil,
+            preferredUnit: .oz,
+            colorMode: .day,
+            authEmail: nil,
+            displayName: nil,
+            isSignedInWithApple: false,
+            hasCompletedHouseholdSetup: false,
+            isDemoPreview: false
         )
     }
 

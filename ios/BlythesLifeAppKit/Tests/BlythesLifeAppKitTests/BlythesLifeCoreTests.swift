@@ -75,6 +75,7 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
         var rotateInviteHandler: (@Sendable (UUID, String) throws -> HouseholdDTO)?
         var listProfilesHandler: (@Sendable (String) throws -> [ProfileDTO])?
         var createProfileHandler: (@Sendable (CreateProfileRequest, String) throws -> ProfileDTO)?
+        var updateProfileHandler: (@Sendable (UUID, UpdateProfileRequest, String) throws -> ProfileDTO)?
         var syncPushHandler: (@Sendable (SyncPushRequest, String) throws -> SyncPushResponse)?
         var syncPullHandler: (@Sendable (Date?, Int, String) throws -> SyncPullResponse)?
         var presignHandler: (@Sendable (PresignUploadRequest, String) throws -> PresignUploadResponse)?
@@ -87,6 +88,7 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
         var confirmedScanRequests: [ConfirmPaperScanRequest] = []
         var refreshRequests: [RefreshTokenRequest] = []
         var joinRequests: [(inviteCode: String, displayName: String?)] = []
+        var updatedProfileRequests: [(profileId: UUID, request: UpdateProfileRequest)] = []
         var deleteAccountCallCount: Int = 0
         var logoutCallCount: Int = 0
     }
@@ -229,8 +231,13 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
     }
 
     func updateProfile(profileId: UUID, request: UpdateProfileRequest, accessToken: String) async throws -> ProfileDTO {
-        state.withLock {
-            $0.recordedCalls.append("PATCH /v1/profiles/\(profileId.uuidString.lowercased())")
+        let handler = state.withLock { s -> (@Sendable (UUID, UpdateProfileRequest, String) throws -> ProfileDTO)? in
+            s.recordedCalls.append("PATCH /v1/profiles/\(profileId.uuidString.lowercased())")
+            s.updatedProfileRequests.append((profileId, request))
+            return s.updateProfileHandler
+        }
+        if let handler {
+            return try handler(profileId, request, accessToken)
         }
         return ProfileDTO(
             id: profileId,
@@ -987,13 +994,18 @@ struct LiveBackendIntegrationTests {
         #expect(store.syncStatus == .error("Session expired. Sign in again."))
     }
 
-    @Test("completeAppleSignIn bootstraps new user with household + Blythe profile and clears demo seed")
+    @Test("Fresh live store starts signedOut with empty state; new-user sign-in enters needsHouseholdSetup without auto-creating a household, then createHouseholdAndProfileAsync completes setup")
     func completeAppleSignInBrandNewUser() async throws {
         let mockAPI = MockBackendAPI()
         let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-brand-new")
+        let storage = InMemoryLocalStateStorage()
         let newUserId = UUID()
         let newHouseholdId = UUID()
         let newProfileId = UUID()
+
+        var currentCal = Calendar(identifier: .gregorian)
+        currentCal.timeZone = TimeZone.current
+        let babyBirthDate = currentCal.date(from: DateComponents(year: 2026, month: 3, day: 14, hour: 12))!
 
         mockAPI.state.withLock { state in
             state.signInHandler = { req in
@@ -1011,7 +1023,7 @@ struct LiveBackendIntegrationTests {
                 )
             }
             state.createHouseholdHandler = { name, token in
-                #expect(name == "Blythe's household")
+                #expect(name == "Phan Family")
                 #expect(token == "live-jwt-1")
                 return HouseholdDTO(
                     id: newHouseholdId,
@@ -1023,24 +1035,34 @@ struct LiveBackendIntegrationTests {
             state.createProfileHandler = { req, token in
                 #expect(req.householdId == newHouseholdId)
                 #expect(req.displayName == "Blythe")
+                #expect(req.birthDate == "2026-03-14")
                 #expect(token == "live-jwt-1")
                 return ProfileDTO(
                     id: newProfileId,
                     householdId: newHouseholdId,
                     displayName: req.displayName,
+                    birthDate: req.birthDate,
                     defaultTimezone: req.defaultTimezone,
                     scheduleConfig: req.scheduleConfig ?? ScheduleConfig()
                 )
             }
-            state.syncPullHandler = { _, _, _ in
-                SyncPullResponse(events: [], profiles: [], serverWatermark: Date(), hasMore: false)
-            }
         }
 
-        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
-        #expect(!store.events.isEmpty) // Demo seed initially present
-        #expect(!store.scannedSheets.isEmpty)
+        // 1. Fresh live store starts at .signedOut with ZERO fake sample data
+        let store = BlythesLifeStore(
+            storage: storage,
+            apiClient: mockAPI,
+            tokenStore: tokenStore
+        )
+        #expect(store.sessionStage == .signedOut)
+        #expect(store.isSignedInWithApple == false)
+        #expect(store.isDemoPreview == false)
+        #expect(store.isLiveSession == false)
+        #expect(store.events.isEmpty)
+        #expect(store.scannedSheets.isEmpty)
+        #expect(store.outbox.isEmpty)
 
+        // 2. Brand-new user sign-in transitions to .needsHouseholdSetup WITHOUT auto-creating a household
         try await store.completeAppleSignIn(
             identityToken: "apple-jwt-token",
             rawNonce: "raw-nonce-xyz",
@@ -1051,15 +1073,374 @@ struct LiveBackendIntegrationTests {
         defer { store.stopRealtimeSync() }
 
         #expect(store.isSignedInWithApple == true)
+        #expect(store.isDemoPreview == false)
+        #expect(store.isLiveSession == true)
         #expect(store.isAuthenticating == false)
+        #expect(store.sessionStage == .needsHouseholdSetup)
+        #expect(store.hasCompletedHouseholdSetup == false)
         #expect(store.currentUserId == newUserId)
-        #expect(store.household.id == newHouseholdId)
-        #expect(store.profile.id == newProfileId)
-        #expect(store.events.isEmpty) // Demo seed cleared!
+        #expect(store.events.isEmpty)
         #expect(store.scannedSheets.isEmpty)
         #expect(store.outbox.isEmpty)
         #expect(store.toast?.message == "Signed in with Apple")
         #expect(tokenStore.load()?.refreshToken == "rt_live_1")
+
+        let callsBeforeCreate = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(!callsBeforeCreate.contains("POST /v1/households"))
+        #expect(!callsBeforeCreate.contains("POST /v1/profiles"))
+        #expect(!callsBeforeCreate.contains("GET /v1/sync/pull"))
+
+        // 3. Explicit household + profile creation transitions cleanly to .ready
+        try await store.createHouseholdAndProfileAsync(
+            householdName: "  Phan Family  ",
+            babyName: "  Blythe  ",
+            birthDate: babyBirthDate
+        )
+
+        #expect(store.sessionStage == .ready)
+        #expect(store.hasCompletedHouseholdSetup == true)
+        #expect(store.household.id == newHouseholdId)
+        #expect(store.household.name == "Phan Family")
+        #expect(store.profile.id == newProfileId)
+        #expect(store.profile.displayName == "Blythe")
+        #expect(store.profile.birthDate == "2026-03-14")
+        #expect(store.events.isEmpty)
+        #expect(store.toast?.message == "Household created")
+    }
+
+    @Test("Brand-new user joining spouse household from needsHouseholdSetup transitions to ready without creating an orphaned household")
+    func newUserJoinsSpouseHouseholdFromSetup() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-spouse-new")
+        let storage = InMemoryLocalStateStorage()
+        let spouseUserId = UUID()
+        let spouseHouseholdId = UUID()
+        let sharedProfileId = UUID()
+        let sharedEvent = EventDTO(
+            id: UUID(),
+            profileId: sharedProfileId,
+            eventType: .feeding,
+            startedAt: Date().addingTimeInterval(-1800),
+            timezone: "America/Los_Angeles",
+            metadata: .feeding(FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: 4.0)),
+            createdBy: SampleSeedData.ownerUserId,
+            updatedBy: SampleSeedData.ownerUserId
+        )
+
+        mockAPI.state.withLock { state in
+            state.signInHandler = { _ in
+                AuthSessionResponse(
+                    accessToken: "jwt-spouse",
+                    expiresIn: 900,
+                    refreshToken: "rt-spouse",
+                    user: UserDTO(id: spouseUserId, displayName: "Sarah", primaryEmail: "sarah@example.com"),
+                    households: []
+                )
+            }
+            state.joinHouseholdHandler = { code, _, _ in
+                #expect(code == "882244")
+                return HouseholdDTO(
+                    id: spouseHouseholdId,
+                    name: "Blythe's household",
+                    inviteCode: "882244",
+                    createdBy: SampleSeedData.ownerUserId
+                )
+            }
+            state.listProfilesHandler = { _ in
+                [
+                    ProfileDTO(
+                        id: sharedProfileId,
+                        householdId: spouseHouseholdId,
+                        displayName: "Blythe",
+                        birthDate: "2026-03-25",
+                        defaultTimezone: "America/Los_Angeles"
+                    )
+                ]
+            }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(
+                    events: [sharedEvent],
+                    profiles: [],
+                    serverWatermark: Date(),
+                    hasMore: false
+                )
+            }
+        }
+
+        let store = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        try await store.completeAppleSignIn(identityToken: "jwt", rawNonce: "nonce")
+        defer { store.stopRealtimeSync() }
+        #expect(store.sessionStage == .needsHouseholdSetup)
+
+        try await store.joinHouseholdAsync(inviteCode: "882 244", displayName: "Sarah")
+
+        #expect(store.sessionStage == .ready)
+        #expect(store.hasCompletedHouseholdSetup == true)
+        #expect(store.household.id == spouseHouseholdId)
+        #expect(store.profile.id == sharedProfileId)
+        #expect(store.events.count == 1)
+        #expect(store.events.first?.id == sharedEvent.id)
+        let calls = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(!calls.contains("POST /v1/households"))
+        #expect(!calls.contains("POST /v1/profiles"))
+    }
+
+    @Test("completeAppleSignIn prefers multi-member household when returning user belongs to multiple households")
+    func completeAppleSignInPrefersMultiMemberHousehold() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-multi-hh")
+        let storage = InMemoryLocalStateStorage()
+        let userId = UUID()
+        let soloHouseholdId = UUID()
+        let sharedHouseholdId = UUID()
+        let sharedProfileId = UUID()
+
+        let soloHousehold = HouseholdDTO(
+            id: soloHouseholdId,
+            name: "Solo",
+            inviteCode: "111111",
+            createdBy: userId,
+            members: [
+                HouseholdMemberDTO(householdId: soloHouseholdId, userId: userId, role: .owner, displayName: "Sarah")
+            ]
+        )
+        let sharedHousehold = HouseholdDTO(
+            id: sharedHouseholdId,
+            name: "Phan Family",
+            inviteCode: "222222",
+            createdBy: SampleSeedData.ownerUserId,
+            members: [
+                HouseholdMemberDTO(householdId: sharedHouseholdId, userId: SampleSeedData.ownerUserId, role: .owner, displayName: "Brian"),
+                HouseholdMemberDTO(householdId: sharedHouseholdId, userId: userId, role: .member, displayName: "Sarah")
+            ]
+        )
+        let sharedProfile = ProfileDTO(
+            id: sharedProfileId,
+            householdId: sharedHouseholdId,
+            displayName: "Blythe",
+            birthDate: "2026-03-25",
+            defaultTimezone: "America/Los_Angeles"
+        )
+
+        mockAPI.state.withLock { state in
+            state.signInHandler = { _ in
+                AuthSessionResponse(
+                    accessToken: "jwt-multi",
+                    expiresIn: 900,
+                    refreshToken: "rt-multi",
+                    user: UserDTO(id: userId, displayName: "Sarah", primaryEmail: "sarah@example.com"),
+                    households: [soloHousehold, sharedHousehold]
+                )
+            }
+            state.listProfilesHandler = { _ in [sharedProfile] }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(events: [], profiles: [sharedProfile], serverWatermark: Date(), hasMore: false)
+            }
+        }
+
+        let store = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        try await store.completeAppleSignIn(identityToken: "jwt", rawNonce: "nonce")
+        defer { store.stopRealtimeSync() }
+
+        #expect(store.sessionStage == .ready)
+        #expect(store.household.id == sharedHouseholdId)
+        #expect(store.profile.id == sharedProfileId)
+    }
+
+    @Test("updateBabyProfileAsync hits PATCH /v1/profiles/:id, updates profile fields, and falls back to outbox offline")
+    func updateBabyProfileOnlineAndOffline() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "profile-jwt",
+                refreshToken: "rt-profile",
+                deviceId: "dev-profile"
+            )
+        )
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        let profileId = store.profile.id
+        let householdId = store.household.id
+        let defaultTimezone = store.profile.defaultTimezone
+        let scheduleConfig = store.profile.scheduleConfig
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.current
+        let updatedBirthDate = cal.date(from: DateComponents(year: 2026, month: 4, day: 2, hour: 12))!
+
+        mockAPI.state.withLock { state in
+            state.updateProfileHandler = { id, req, token in
+                #expect(id == profileId)
+                #expect(token == "profile-jwt")
+                #expect(req.displayName == "Blythe Rose")
+                #expect(req.birthDate == "2026-04-02")
+                return ProfileDTO(
+                    id: id,
+                    householdId: householdId,
+                    displayName: req.displayName ?? "Blythe",
+                    birthDate: req.birthDate,
+                    defaultTimezone: defaultTimezone,
+                    scheduleConfig: scheduleConfig
+                )
+            }
+        }
+
+        try await store.updateBabyProfileAsync(displayName: "  Blythe Rose  ", birthDate: updatedBirthDate)
+        #expect(store.profile.displayName == "Blythe Rose")
+        #expect(store.profile.birthDate == "2026-04-02")
+        #expect(store.toast?.message == "Profile updated")
+        let calls = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(calls.contains("PATCH /v1/profiles/\(profileId.uuidString.lowercased())"))
+
+        // Rejects empty/whitespace name
+        var threwEmptyError = false
+        do {
+            try await store.updateBabyProfileAsync(displayName: "   ", birthDate: nil)
+        } catch {
+            threwEmptyError = true
+        }
+        #expect(threwEmptyError == true)
+
+        // Offline fallback queues profile upsert into durable outbox
+        mockAPI.state.withLock { state in
+            state.updateProfileHandler = { _, _, _ in
+                throw BackendAPIError.networkError("Offline")
+            }
+        }
+        try await store.updateBabyProfileAsync(displayName: "Blythe M.", birthDate: nil)
+        #expect(store.profile.displayName == "Blythe M.")
+        #expect(store.profile.birthDate == nil)
+        #expect(store.outbox.contains(where: { $0.entityKind == .profile && $0.entityId == profileId }))
+    }
+
+    @Test("enterDemoPreview loads sample data without overwriting tokens, and exitDemoPreview returns cleanly to signedOut")
+    func demoPreviewEnterAndExit() {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-demo-toggle")
+        let storage = InMemoryLocalStateStorage()
+
+        let store = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        #expect(store.sessionStage == .signedOut)
+        #expect(store.events.isEmpty)
+        #expect(store.isDemoPreview == false)
+
+        store.enterDemoPreview()
+        #expect(store.isDemoPreview == true)
+        #expect(store.isLiveSession == false)
+        #expect(store.sessionStage == .ready)
+        #expect(!store.events.isEmpty)
+        #expect(store.todayEvents.count == 8)
+        #expect(store.now == SampleSeedData.defaultReferenceDate)
+        #expect(tokenStore.load() == nil)
+
+        store.exitDemoPreview()
+        #expect(store.isDemoPreview == false)
+        #expect(store.sessionStage == .signedOut)
+        #expect(store.events.isEmpty)
+        #expect(store.scannedSheets.isEmpty)
+        #expect(store.outbox.isEmpty)
+        #expect(store.activeNapStart == nil)
+        #expect(store.activeNursing == nil)
+    }
+
+    @Test("signOutOnThisDeviceAsync clears tokens, revokes session, and returns to signedOut with zero events")
+    func signOutResetsToSignedOutBlankState() async {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "jwt-signout",
+                refreshToken: "rt-signout",
+                deviceId: "dev-signout"
+            )
+        )
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        #expect(store.sessionStage == .ready)
+        #expect(!store.events.isEmpty)
+
+        await store.signOutOnThisDeviceAsync()
+
+        #expect(mockAPI.state.withLock { $0.logoutCallCount } == 1)
+        #expect(tokenStore.load() == nil)
+        #expect(store.isSignedInWithApple == false)
+        #expect(store.isDemoPreview == false)
+        #expect(store.hasCompletedHouseholdSetup == false)
+        #expect(store.sessionStage == .signedOut)
+        #expect(store.events.isEmpty)
+        #expect(store.scannedSheets.isEmpty)
+        #expect(store.outbox.isEmpty)
+        #expect(store.activeNapStart == nil)
+        #expect(store.activeNursing == nil)
+        #expect(store.toast?.message == "Signed out on this device")
+    }
+
+    @Test("resumeLiveSession checks /v1/auth/me during needsHouseholdSetup and transitions to ready when household exists on another device")
+    func resumeLiveSessionNeedsHouseholdSetupTransition() async {
+        let mockAPI = MockBackendAPI()
+        let userId = UUID()
+        let remoteHouseholdId = UUID()
+        let remoteProfileId = UUID()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "jwt-setup",
+                refreshToken: "rt-setup",
+                deviceId: "dev-setup"
+            )
+        )
+        let storage = InMemoryLocalStateStorage(initialState: SampleSeedData.makeBlankState())
+
+        // First launch: server still has 0 households -> stay at .needsHouseholdSetup without creating one!
+        mockAPI.state.withLock { state in
+            state.meHandler = { _ in
+                AuthMeResponse(
+                    user: UserDTO(id: userId, displayName: "Brian", primaryEmail: "brian@example.com"),
+                    households: []
+                )
+            }
+        }
+
+        let store = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        #expect(store.sessionStage == .needsHouseholdSetup)
+
+        await store.resumeLiveSession()
+        #expect(store.sessionStage == .needsHouseholdSetup)
+        let callsWhileEmpty = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(callsWhileEmpty.contains("GET /v1/auth/me"))
+        #expect(!callsWhileEmpty.contains("POST /v1/households"))
+        #expect(!callsWhileEmpty.contains("GET /v1/sync/pull"))
+
+        // Second check: user created/joined a household on another device -> transitions cleanly to .ready!
+        let remoteHousehold = HouseholdDTO(
+            id: remoteHouseholdId,
+            name: "Phan Family",
+            inviteCode: "909090",
+            createdBy: userId
+        )
+        let remoteProfile = ProfileDTO(
+            id: remoteProfileId,
+            householdId: remoteHouseholdId,
+            displayName: "Blythe",
+            birthDate: "2026-03-25",
+            defaultTimezone: "America/Los_Angeles"
+        )
+        mockAPI.state.withLock { state in
+            state.meHandler = { _ in
+                AuthMeResponse(
+                    user: UserDTO(id: userId, displayName: "Brian", primaryEmail: "brian@example.com"),
+                    households: [remoteHousehold]
+                )
+            }
+            state.listProfilesHandler = { _ in [remoteProfile] }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(events: [], profiles: [remoteProfile], serverWatermark: Date(), hasMore: false)
+            }
+        }
+
+        await store.resumeLiveSession()
+        defer { store.stopRealtimeSync() }
+
+        #expect(store.sessionStage == .ready)
+        #expect(store.hasCompletedHouseholdSetup == true)
+        #expect(store.household.id == remoteHouseholdId)
+        #expect(store.profile.id == remoteProfileId)
     }
 
     @Test("completeAppleSignIn adopts existing household & profile and pulls remote events for returning user")
@@ -1209,9 +1590,14 @@ struct LiveBackendIntegrationTests {
         try await store.deleteAccountAsync()
         #expect(mockAPI.state.withLock { $0.deleteAccountCallCount } == 1)
         #expect(store.isSignedInWithApple == false)
+        #expect(store.isDemoPreview == false)
+        #expect(store.hasCompletedHouseholdSetup == false)
+        #expect(store.sessionStage == .signedOut)
         #expect(store.authEmail == nil)
         #expect(store.displayName == nil)
         #expect(store.events.isEmpty)
+        #expect(store.scannedSheets.isEmpty)
+        #expect(store.outbox.isEmpty)
         #expect(tokenStore.load() == nil)
         #expect(store.toast?.message == "Account deleted")
     }
@@ -1706,6 +2092,22 @@ struct PortabilityAndInfrastructureTests {
 
         try storage.clear()
         #expect(try storage.load() == nil)
+    }
+
+    @Test("PersistedAppState decodes legacy JSON missing hasCompletedHouseholdSetup and isDemoPreview cleanly")
+    func persistedAppStateBackwardCompatibleDecode() throws {
+        let seed = SampleSeedData.makeDemoState()
+        let encoded = try BlythesLifeJSONCoding.makeEncoder().encode(seed)
+        var jsonObj = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        jsonObj.removeValue(forKey: "hasCompletedHouseholdSetup")
+        jsonObj.removeValue(forKey: "isDemoPreview")
+        let legacyData = try JSONSerialization.data(withJSONObject: jsonObj)
+
+        let decoded = try BlythesLifeJSONCoding.makeDecoder().decode(PersistedAppState.self, from: legacyData)
+        #expect(decoded.hasCompletedHouseholdSetup == true)
+        #expect(decoded.isDemoPreview == false)
+        #expect(decoded.profile.id == seed.profile.id)
+        #expect(decoded.household.id == seed.household.id)
     }
 
     @Test("SyncSSEParser parses single-line and multi-line SSE notifications while ignoring keepalives")

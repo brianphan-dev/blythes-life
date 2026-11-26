@@ -7,6 +7,13 @@ import UIKit
 
 // MARK: - View Models & Supporting State
 
+/// High-level onboarding and authentication lifecycle stage for the root app shell.
+public enum AppSessionStage: String, Codable, Sendable, Equatable {
+    case signedOut
+    case needsHouseholdSetup
+    case ready
+}
+
 public enum SyncStatus: Sendable, Equatable {
     case localOnly
     case synced(Date)
@@ -242,6 +249,9 @@ public final class BlythesLifeStore {
     public var now: Date
     public var toast: ToastState?
     public var syncStatus: SyncStatus
+    public var sessionStage: AppSessionStage
+    public var isDemoPreview: Bool
+    public var hasCompletedHouseholdSetup: Bool
     public var isSignedInWithApple: Bool
     public var authEmail: String?
     public var displayName: String?
@@ -254,9 +264,14 @@ public final class BlythesLifeStore {
 
     public var outboxCount: Int { outbox.count }
 
+    /// True when the user is signed into the live backend and not previewing sample data.
+    public var isLiveSession: Bool {
+        isSignedInWithApple && !isDemoPreview && apiClient != nil
+    }
+
     /// True when a live backend client is configured and the store holds active auth credentials.
     public var hasLiveSession: Bool {
-        apiClient != nil && isSignedInWithApple && (accessToken != nil || refreshToken != nil)
+        apiClient != nil && isSignedInWithApple && !isDemoPreview && (accessToken != nil || refreshToken != nil)
     }
 
     @ObservationIgnored private let storage: any LocalStateStorage
@@ -289,14 +304,73 @@ public final class BlythesLifeStore {
         self.lastSyncError = nil
         self.apiBaseURLString = apiClient?.baseURL.absoluteString
             ?? URLSessionBackendAPIClient.defaultBaseURL.absoluteString
+        self.postureOverride = .automatic
+        self.toast = nil
 
         let loadedState: PersistedAppState
-        if let existing = try? storage.load() {
-            loadedState = existing
+        if apiClient != nil {
+            if let storedTokens = tokenStore.load() {
+                let launchNow = initialNow ?? Date()
+                loadedState = (try? storage.load()) ?? SampleSeedData.makeBlankState(referenceDate: launchNow)
+                self.accessToken = accessToken ?? storedTokens.accessToken
+                self.refreshToken = refreshToken ?? storedTokens.refreshToken
+                self.isSignedInWithApple = true
+                self.isDemoPreview = false
+                self.hasCompletedHouseholdSetup = loadedState.hasCompletedHouseholdSetup
+                self.sessionStage = loadedState.hasCompletedHouseholdSetup ? .ready : .needsHouseholdSetup
+                self.now = launchNow
+                self.syncStatus = loadedState.hasCompletedHouseholdSetup ? .syncing : .localOnly
+            } else if let accessToken {
+                let launchNow = initialNow ?? seedReferenceDate
+                loadedState = (try? storage.load()) ?? SampleSeedData.makeBlankState(referenceDate: launchNow)
+                self.accessToken = accessToken
+                self.refreshToken = refreshToken
+                self.isSignedInWithApple = true
+                self.isDemoPreview = false
+                self.hasCompletedHouseholdSetup = loadedState.hasCompletedHouseholdSetup
+                self.sessionStage = loadedState.hasCompletedHouseholdSetup ? .ready : .needsHouseholdSetup
+                self.now = launchNow
+                if let watermark = loadedState.serverWatermark {
+                    self.syncStatus = .synced(watermark)
+                } else if !loadedState.outbox.isEmpty {
+                    self.syncStatus = .offline(pendingCount: loadedState.outbox.count)
+                } else {
+                    self.syncStatus = .localOnly
+                }
+            } else {
+                // Default production fresh install or signed-out launch: never auto-seed demo data.
+                let launchNow = initialNow ?? Date()
+                var blank = SampleSeedData.makeBlankState(referenceDate: launchNow)
+                if let existing = try? storage.load() {
+                    blank.preferredUnit = existing.preferredUnit
+                    blank.colorMode = existing.colorMode
+                }
+                loadedState = blank
+                self.accessToken = nil
+                self.refreshToken = refreshToken
+                self.isSignedInWithApple = false
+                self.isDemoPreview = false
+                self.hasCompletedHouseholdSetup = false
+                self.sessionStage = .signedOut
+                self.now = launchNow
+                self.syncStatus = .localOnly
+            }
         } else {
-            let demo = SampleSeedData.makeDemoState(referenceDate: seedReferenceDate)
-            loadedState = demo
-            try? storage.save(demo)
+            if let existing = try? storage.load() {
+                loadedState = existing
+            } else {
+                let demo = SampleSeedData.makeDemoState(referenceDate: seedReferenceDate)
+                loadedState = demo
+                try? storage.save(demo)
+            }
+            self.accessToken = nil
+            self.refreshToken = nil
+            self.isSignedInWithApple = loadedState.isSignedInWithApple
+            self.isDemoPreview = true
+            self.hasCompletedHouseholdSetup = true
+            self.sessionStage = .ready
+            self.now = initialNow ?? seedReferenceDate
+            self.syncStatus = .localOnly
         }
 
         self.profile = loadedState.profile
@@ -312,44 +386,6 @@ public final class BlythesLifeStore {
         self.colorModePreference = loadedState.colorMode
         self.authEmail = loadedState.authEmail
         self.displayName = loadedState.displayName
-        self.postureOverride = .automatic
-        self.toast = nil
-
-        if let storedTokens = tokenStore.load() {
-            self.accessToken = accessToken ?? storedTokens.accessToken
-            self.refreshToken = refreshToken ?? storedTokens.refreshToken
-            self.isSignedInWithApple = true
-            self.now = initialNow ?? Date()
-            self.syncStatus = apiClient != nil ? .syncing : .localOnly
-        } else if let accessToken {
-            self.accessToken = accessToken
-            self.refreshToken = refreshToken
-            self.isSignedInWithApple = true
-            self.now = initialNow ?? seedReferenceDate
-            if apiClient != nil {
-                if let watermark = loadedState.serverWatermark {
-                    self.syncStatus = .synced(watermark)
-                } else if !loadedState.outbox.isEmpty {
-                    self.syncStatus = .offline(pendingCount: loadedState.outbox.count)
-                } else {
-                    self.syncStatus = .localOnly
-                }
-            } else {
-                self.syncStatus = .localOnly
-            }
-        } else if apiClient != nil {
-            self.accessToken = nil
-            self.refreshToken = refreshToken
-            self.isSignedInWithApple = false
-            self.now = initialNow ?? seedReferenceDate
-            self.syncStatus = .localOnly
-        } else {
-            self.accessToken = nil
-            self.refreshToken = nil
-            self.isSignedInWithApple = loadedState.isSignedInWithApple
-            self.now = initialNow ?? seedReferenceDate
-            self.syncStatus = .localOnly
-        }
 
         if autoStartClock {
             startClock()
@@ -1738,7 +1774,8 @@ public final class BlythesLifeStore {
     }
 
     /// Completes Sign in with Apple against `POST /v1/auth/apple`, persists rotated tokens in Keychain,
-    /// resolves or creates the user's household and profile on Postgres, pulls events, and starts SSE sync.
+    /// resolves existing households (preferring multi-member / profiled households), or transitions a brand-new user
+    /// to `.needsHouseholdSetup` without auto-creating an orphaned household.
     public func completeAppleSignIn(
         identityToken: String,
         rawNonce: String,
@@ -1772,23 +1809,25 @@ public final class BlythesLifeStore {
             authEmail = trimmedNonEmpty(session.user.primaryEmail) ?? trimmedNonEmpty(email)
             self.displayName = trimmedNonEmpty(session.user.displayName) ?? trimmedNonEmpty(displayName)
             isSignedInWithApple = true
+            isDemoPreview = false
             now = Date()
             lastSyncError = nil
 
-            if let existingHousehold = session.households.first {
-                household = existingHousehold
+            if !session.households.isEmpty {
                 let profiles = try await performAuthorized { token in
                     try await apiClient.listProfiles(accessToken: token)
                 }
-                if let matched = profiles.first(where: { $0.householdId == existingHousehold.id && $0.deletedAt == nil })
-                    ?? profiles.first(where: { $0.deletedAt == nil })
-                {
+                let chosenHousehold = Self.selectPreferredHousehold(from: session.households, profiles: profiles)
+                    ?? session.households[0]
+                household = chosenHousehold
+
+                if let matched = profiles.first(where: { $0.householdId == chosenHousehold.id && $0.deletedAt == nil }) {
                     profile = matched
                 } else {
                     profile = try await performAuthorized { token in
                         try await apiClient.createProfile(
                             CreateProfileRequest(
-                                householdId: existingHousehold.id,
+                                householdId: chosenHousehold.id,
                                 displayName: "Blythe",
                                 defaultTimezone: TimeZone.current.identifier,
                                 scheduleConfig: ScheduleConfig()
@@ -1797,39 +1836,99 @@ public final class BlythesLifeStore {
                         )
                     }
                 }
+
+                // Clear stale local state before pulling authoritative server history.
+                events = []
+                scannedSheets = []
+                activeNapStart = nil
+                activeNursing = nil
+                outbox = []
+                serverWatermark = nil
+                hasCompletedHouseholdSetup = true
+                sessionStage = .ready
+                persistState()
+
+                await pullFromServer()
+                startRealtimeSync()
+                showToast("Signed in with Apple", undo: nil)
             } else {
-                let createdHousehold = try await performAuthorized { token in
-                    try await apiClient.createHousehold(
-                        name: "Blythe's household",
-                        accessToken: token
-                    )
-                }
-                household = createdHousehold
-                profile = try await performAuthorized { token in
-                    try await apiClient.createProfile(
-                        CreateProfileRequest(
-                            householdId: createdHousehold.id,
-                            displayName: "Blythe",
-                            defaultTimezone: TimeZone.current.identifier,
-                            scheduleConfig: ScheduleConfig()
-                        ),
-                        accessToken: token
-                    )
-                }
+                // Brand-new user: do NOT auto-create a household yet. Let the user choose Create vs Join.
+                stopRealtimeSync()
+                let blank = SampleSeedData.makeBlankState(referenceDate: now)
+                household = blank.household
+                profile = blank.profile
+                events = []
+                scannedSheets = []
+                activeNapStart = nil
+                activeNursing = nil
+                outbox = []
+                serverWatermark = nil
+                hasCompletedHouseholdSetup = false
+                sessionStage = .needsHouseholdSetup
+                syncStatus = .localOnly
+                persistState()
+
+                showToast("Signed in with Apple", undo: nil)
+            }
+        } catch {
+            lastSyncError = error.localizedDescription
+            throw error
+        }
+    }
+
+    /// Explicitly creates a new household and initial baby profile on Postgres during onboarding,
+    /// then transitions the store to `.ready` and starts realtime sync.
+    public func createHouseholdAndProfileAsync(
+        householdName: String,
+        babyName: String,
+        birthDate: Date?
+    ) async throws {
+        guard let apiClient else {
+            throw BackendAPIError.networkError("Backend client is not configured.")
+        }
+
+        let trimmedBabyName = trimmedNonEmpty(babyName) ?? "Blythe"
+        let trimmedHouseholdName = trimmedNonEmpty(householdName) ?? "\(trimmedBabyName)'s household"
+        let formattedBirthDate = birthDate.map { Self.formatCalendarDateISO($0, timeZone: TimeZone.current) }
+
+        do {
+            let createdHousehold = try await performAuthorized { token in
+                try await apiClient.createHousehold(
+                    name: trimmedHouseholdName,
+                    accessToken: token
+                )
+            }
+            let createdProfile = try await performAuthorized { token in
+                try await apiClient.createProfile(
+                    CreateProfileRequest(
+                        householdId: createdHousehold.id,
+                        displayName: trimmedBabyName,
+                        birthDate: formattedBirthDate,
+                        defaultTimezone: TimeZone.current.identifier,
+                        scheduleConfig: ScheduleConfig()
+                    ),
+                    accessToken: token
+                )
             }
 
-            // Replace local demo seed with clean live state before pulling authoritative server history.
+            household = createdHousehold
+            profile = createdProfile
             events = []
             scannedSheets = []
             activeNapStart = nil
             activeNursing = nil
             outbox = []
             serverWatermark = nil
+            isDemoPreview = false
+            hasCompletedHouseholdSetup = true
+            sessionStage = .ready
+            lastSyncError = nil
+            now = Date()
+            syncStatus = .synced(now)
             persistState()
 
-            await pullFromServer()
             startRealtimeSync()
-            showToast("Signed in with Apple", undo: nil)
+            showToast("Household created", undo: nil)
         } catch {
             lastSyncError = error.localizedDescription
             throw error
@@ -1838,15 +1937,88 @@ public final class BlythesLifeStore {
 
     /// Restores and resumes a live backend session on app launch or return to foreground.
     public func resumeLiveSession() async {
-        guard let apiClient else { return }
+        guard let apiClient, !isDemoPreview else { return }
 
         if accessToken == nil && refreshToken == nil, let stored = tokenStore.load() {
             accessToken = stored.accessToken
             refreshToken = stored.refreshToken
             isSignedInWithApple = true
+            if sessionStage == .signedOut {
+                sessionStage = hasCompletedHouseholdSetup ? .ready : .needsHouseholdSetup
+            }
         }
 
-        guard isSignedInWithApple, (accessToken != nil || refreshToken != nil) else { return }
+        guard isSignedInWithApple, !isDemoPreview, (accessToken != nil || refreshToken != nil) else { return }
+
+        if sessionStage == .needsHouseholdSetup {
+            do {
+                let me = try await performAuthorized { token in
+                    try await apiClient.fetchMe(accessToken: token)
+                }
+                currentUserId = me.user.id
+                if let serverEmail = trimmedNonEmpty(me.user.primaryEmail) {
+                    authEmail = serverEmail
+                }
+                if let serverName = trimmedNonEmpty(me.user.displayName) {
+                    displayName = serverName
+                }
+
+                guard !me.households.isEmpty else {
+                    hasCompletedHouseholdSetup = false
+                    sessionStage = .needsHouseholdSetup
+                    syncStatus = .localOnly
+                    persistState()
+                    return
+                }
+
+                let profiles = try await performAuthorized { token in
+                    try await apiClient.listProfiles(accessToken: token)
+                }
+                let chosenHousehold = Self.selectPreferredHousehold(from: me.households, profiles: profiles)
+                    ?? me.households[0]
+                household = chosenHousehold
+
+                if let matchedProfile = profiles.first(where: { $0.householdId == chosenHousehold.id && $0.deletedAt == nil }) {
+                    profile = matchedProfile
+                } else {
+                    profile = try await performAuthorized { token in
+                        try await apiClient.createProfile(
+                            CreateProfileRequest(
+                                householdId: chosenHousehold.id,
+                                displayName: "Blythe",
+                                defaultTimezone: TimeZone.current.identifier,
+                                scheduleConfig: ScheduleConfig()
+                            ),
+                            accessToken: token
+                        )
+                    }
+                }
+
+                events = []
+                scannedSheets = []
+                activeNapStart = nil
+                activeNursing = nil
+                outbox = []
+                serverWatermark = nil
+                hasCompletedHouseholdSetup = true
+                sessionStage = .ready
+                now = Date()
+                lastSyncError = nil
+                persistState()
+
+                await flushOutbox()
+                await pullFromServer()
+                startRealtimeSync()
+            } catch BackendAPIError.unauthorized {
+                // `performAuthorized` already signed out cleanly on refresh failure.
+                return
+            } catch {
+                lastSyncError = error.localizedDescription
+            }
+            return
+        }
+
+        guard sessionStage == .ready else { return }
 
         now = Date()
         syncStatus = .syncing
@@ -1863,29 +2035,39 @@ public final class BlythesLifeStore {
                 displayName = serverName
             }
 
-            if let matchingHousehold = me.households.first(where: { $0.id == self.household.id }) {
-                household = matchingHousehold
-            } else if let firstHousehold = me.households.first {
-                household = firstHousehold
-            } else {
-                household = try await performAuthorized { token in
-                    try await apiClient.createHousehold(name: "Blythe's household", accessToken: token)
-                }
+            guard !me.households.isEmpty else {
+                stopRealtimeSync()
+                hasCompletedHouseholdSetup = false
+                sessionStage = .needsHouseholdSetup
+                syncStatus = .localOnly
+                persistState()
+                return
             }
 
             let profiles = try await performAuthorized { token in
                 try await apiClient.listProfiles(accessToken: token)
             }
-            if let sameProfile = profiles.first(where: { $0.id == self.profile.id && $0.deletedAt == nil }) {
+
+            if let matchingHousehold = me.households.first(where: { $0.id == self.household.id }) {
+                household = matchingHousehold
+            } else if let chosenHousehold = Self.selectPreferredHousehold(from: me.households, profiles: profiles) {
+                household = chosenHousehold
+            }
+
+            if let sameProfile = profiles.first(where: {
+                $0.id == self.profile.id && $0.householdId == self.household.id && $0.deletedAt == nil
+            }) {
                 if sameProfile.updatedAt >= profile.updatedAt {
                     profile = sameProfile
                 }
             } else if let householdProfile = profiles.first(where: { $0.householdId == self.household.id && $0.deletedAt == nil }) {
-                let wasDemoProfile = (profile.id == SampleSeedData.profileId)
+                let wasDifferentProfile = (profile.id != householdProfile.id)
                 profile = householdProfile
-                if wasDemoProfile {
+                if wasDifferentProfile {
                     events = []
                     scannedSheets = []
+                    activeNapStart = nil
+                    activeNursing = nil
                     serverWatermark = nil
                 }
             } else {
@@ -1908,6 +2090,8 @@ public final class BlythesLifeStore {
                 }
             }
 
+            hasCompletedHouseholdSetup = true
+            sessionStage = .ready
             persistState()
         } catch BackendAPIError.unauthorized {
             // `performAuthorized` already signed out cleanly on refresh failure.
@@ -1917,6 +2101,7 @@ public final class BlythesLifeStore {
             lastSyncError = error.localizedDescription
         }
 
+        guard isSignedInWithApple && !isDemoPreview && sessionStage == .ready else { return }
         await flushOutbox()
         await pullFromServer()
         startRealtimeSync()
@@ -1962,12 +2147,117 @@ public final class BlythesLifeStore {
         activeNursing = nil
         outbox = []
         serverWatermark = nil
+        isDemoPreview = false
+        hasCompletedHouseholdSetup = true
+        sessionStage = .ready
         lastSyncError = nil
         persistState()
 
         await pullFromServer()
         startRealtimeSync()
         showToast("Joined \(joined.name)", undo: nil)
+    }
+
+    /// Updates the baby profile's display name and optional birth date locally and persists via `PATCH /v1/profiles/:id`
+    /// when signed in (with durable profile outbox fallback if offline).
+    public func updateBabyProfileAsync(
+        displayName: String,
+        birthDate: Date?
+    ) async throws {
+        guard let trimmedName = trimmedNonEmpty(displayName) else {
+            throw BackendAPIError.httpError(statusCode: 400, message: "Baby name is required.")
+        }
+
+        let formattedBirthDate = birthDate.map { Self.formatCalendarDateISO($0, timeZone: TimeZone.current) }
+        profile.displayName = trimmedName
+        profile.birthDate = formattedBirthDate
+        profile.updatedAt = now
+        persistState()
+
+        if hasLiveSession, let apiClient {
+            let request = UpdateProfileRequest(
+                displayName: trimmedName,
+                birthDate: formattedBirthDate
+            )
+            do {
+                let updated = try await performAuthorized { token in
+                    try await apiClient.updateProfile(
+                        profileId: self.profile.id,
+                        request: request,
+                        accessToken: token
+                    )
+                }
+                profile = updated
+                lastSyncError = nil
+                persistState()
+            } catch BackendAPIError.unauthorized {
+                lastSyncError = "Session expired. Sign in again."
+                persistState()
+                throw BackendAPIError.unauthorized
+            } catch {
+                // Offline fallback: enqueue profile upsert into durable outbox so it syncs when back online.
+                enqueueProfileOutbox(profile)
+                lastSyncError = error.localizedDescription
+                if isSignedInWithApple {
+                    syncStatus = .offline(pendingCount: outbox.count)
+                }
+                persistState()
+            }
+        }
+
+        showToast("Profile updated", undo: nil)
+    }
+
+    /// Explicitly enters local interactive demo preview mode without touching Keychain auth tokens.
+    public func enterDemoPreview() {
+        stopRealtimeSync()
+        let demo = SampleSeedData.makeDemoState(referenceDate: SampleSeedData.defaultReferenceDate)
+        profile = demo.profile
+        household = demo.household
+        currentUserId = demo.currentUserId
+        events = demo.events
+        activeNapStart = nil
+        activeNursing = nil
+        scannedSheets = demo.pendingScans
+        outbox = []
+        serverWatermark = nil
+        preferredUnit = demo.preferredUnit
+        authEmail = demo.authEmail
+        displayName = demo.displayName
+        isDemoPreview = true
+        hasCompletedHouseholdSetup = false
+        sessionStage = .ready
+        syncStatus = .localOnly
+        lastSyncError = nil
+        now = SampleSeedData.defaultReferenceDate
+        dismissToast()
+    }
+
+    /// Exits interactive demo preview mode and resets to a clean signed-out blank state.
+    public func exitDemoPreview() {
+        stopRealtimeSync()
+        let currentNow = Date()
+        let blank = SampleSeedData.makeBlankState(referenceDate: currentNow)
+        profile = blank.profile
+        household = blank.household
+        currentUserId = blank.currentUserId
+        events = []
+        activeNapStart = nil
+        activeNursing = nil
+        scannedSheets = []
+        outbox = []
+        serverWatermark = nil
+        authEmail = nil
+        displayName = nil
+        isSignedInWithApple = false
+        isDemoPreview = false
+        hasCompletedHouseholdSetup = false
+        sessionStage = .signedOut
+        syncStatus = .localOnly
+        lastSyncError = nil
+        now = currentNow
+        dismissToast()
+        persistState()
     }
 
     /// Rotates the active household's 6-digit invite code via `POST /v1/households/:id/invite` when signed in,
@@ -1996,7 +2286,7 @@ public final class BlythesLifeStore {
         showToast("Invite code updated · \(formattedInviteCode)", undo: nil)
     }
 
-    /// Revokes the current device session on the backend (best-effort if offline), clears Keychain tokens, and resets to local demo state.
+    /// Revokes the current device session on the backend (best-effort if offline), clears Keychain tokens, and resets to clean signed-out state.
     public func signOutOnThisDeviceAsync() async {
         let currentAccess = accessToken
         let currentRefresh = refreshToken
@@ -2014,25 +2304,30 @@ public final class BlythesLifeStore {
         }
 
         try? tokenStore.clear()
+        try? storage.clear()
         accessToken = nil
         refreshToken = nil
 
-        let demo = SampleSeedData.makeDemoState(referenceDate: SampleSeedData.defaultReferenceDate)
-        profile = demo.profile
-        household = demo.household
-        currentUserId = demo.currentUserId
-        events = demo.events
+        let currentNow = Date()
+        let blank = SampleSeedData.makeBlankState(referenceDate: currentNow)
+        profile = blank.profile
+        household = blank.household
+        currentUserId = blank.currentUserId
+        events = []
         activeNapStart = nil
         activeNursing = nil
-        scannedSheets = demo.pendingScans
+        scannedSheets = []
         outbox = []
         serverWatermark = nil
         isSignedInWithApple = false
+        isDemoPreview = false
+        hasCompletedHouseholdSetup = false
+        sessionStage = .signedOut
         authEmail = nil
         displayName = nil
         syncStatus = .localOnly
         lastSyncError = nil
-        now = SampleSeedData.defaultReferenceDate
+        now = currentNow
         persistState()
         showToast("Signed out on this device", undo: nil)
     }
@@ -2052,9 +2347,17 @@ public final class BlythesLifeStore {
         try? tokenStore.clear()
         try? storage.clear()
 
+        let currentNow = Date()
+        let blank = SampleSeedData.makeBlankState(referenceDate: currentNow)
         accessToken = nil
         refreshToken = nil
+        profile = blank.profile
+        household = blank.household
+        currentUserId = blank.currentUserId
         isSignedInWithApple = false
+        isDemoPreview = false
+        hasCompletedHouseholdSetup = false
+        sessionStage = .signedOut
         authEmail = nil
         displayName = nil
         events = []
@@ -2065,6 +2368,7 @@ public final class BlythesLifeStore {
         serverWatermark = nil
         syncStatus = .localOnly
         lastSyncError = nil
+        now = currentNow
         persistState()
         showToast("Account deleted", undo: nil)
     }
@@ -2121,11 +2425,30 @@ public final class BlythesLifeStore {
         inFlightRefreshTask?.cancel()
         inFlightRefreshTask = nil
         try? tokenStore.clear()
+        try? storage.clear()
         accessToken = nil
         refreshToken = nil
+
+        let currentNow = Date()
+        let blank = SampleSeedData.makeBlankState(referenceDate: currentNow)
+        profile = blank.profile
+        household = blank.household
+        currentUserId = blank.currentUserId
+        events = []
+        activeNapStart = nil
+        activeNursing = nil
+        scannedSheets = []
+        outbox = []
+        serverWatermark = nil
         isSignedInWithApple = false
+        isDemoPreview = false
+        hasCompletedHouseholdSetup = false
+        sessionStage = .signedOut
+        authEmail = nil
+        displayName = nil
         syncStatus = .localOnly
         lastSyncError = nil
+        now = currentNow
         persistState()
         showToast("Signed out on this device", undo: nil)
     }
@@ -2134,11 +2457,17 @@ public final class BlythesLifeStore {
         let deviceId = tokenStore.loadOrCreateDeviceId()
         saveSessionTokens(session, deviceId: deviceId)
         isSignedInWithApple = true
+        isDemoPreview = false
         authEmail = session.user.primaryEmail
         displayName = session.user.displayName
         currentUserId = session.user.id
         if let firstHousehold = session.households.first {
             household = firstHousehold
+            hasCompletedHouseholdSetup = true
+            sessionStage = .ready
+        } else {
+            hasCompletedHouseholdSetup = false
+            sessionStage = .needsHouseholdSetup
         }
         lastSyncError = nil
         persistState()
@@ -2177,7 +2506,11 @@ public final class BlythesLifeStore {
     }
 
     public func flushOutbox() async {
-        guard let apiClient, (accessToken != nil || refreshToken != nil) else { return }
+        guard let apiClient,
+              !isDemoPreview,
+              sessionStage == .ready,
+              (accessToken != nil || refreshToken != nil)
+        else { return }
         guard !outbox.isEmpty else {
             if let watermark = serverWatermark {
                 syncStatus = .synced(watermark)
@@ -2240,7 +2573,11 @@ public final class BlythesLifeStore {
     }
 
     public func pullFromServer() async {
-        guard let apiClient, (accessToken != nil || refreshToken != nil) else { return }
+        guard let apiClient,
+              !isDemoPreview,
+              sessionStage == .ready,
+              (accessToken != nil || refreshToken != nil)
+        else { return }
         syncStatus = .syncing
 
         do {
@@ -2287,13 +2624,22 @@ public final class BlythesLifeStore {
 
     public func startRealtimeSync() {
         stopRealtimeSync()
-        guard let apiClient, isSignedInWithApple, (accessToken != nil || refreshToken != nil) else { return }
+        guard let apiClient,
+              isSignedInWithApple,
+              !isDemoPreview,
+              sessionStage == .ready,
+              (accessToken != nil || refreshToken != nil)
+        else { return }
 
         let backoffScheduleSeconds: [UInt64] = [2, 5, 15, 30]
         sseTask = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
-                guard let self, self.isSignedInWithApple else { break }
+                guard let self,
+                      self.isSignedInWithApple,
+                      !self.isDemoPreview,
+                      self.sessionStage == .ready
+                else { break }
 
                 let token: String
                 if let current = self.accessToken, !current.isEmpty {
@@ -2330,7 +2676,9 @@ public final class BlythesLifeStore {
                     // Transient stream disconnect: reconnect using exponential backoff below.
                 }
 
-                if Task.isCancelled || !self.isSignedInWithApple { break }
+                if Task.isCancelled || !self.isSignedInWithApple || self.isDemoPreview || self.sessionStage != .ready {
+                    break
+                }
                 if receivedFrame {
                     attempt = 0
                 }
@@ -2372,10 +2720,12 @@ public final class BlythesLifeStore {
             if let serverName = self.trimmedNonEmpty(session.user.displayName) {
                 self.displayName = serverName
             }
-            if let matchingHousehold = session.households.first(where: { $0.id == self.household.id }) {
-                self.household = matchingHousehold
-            } else if let firstHousehold = session.households.first {
-                self.household = firstHousehold
+            if self.hasCompletedHouseholdSetup {
+                if let matchingHousehold = session.households.first(where: { $0.id == self.household.id }) {
+                    self.household = matchingHousehold
+                } else if let firstHousehold = session.households.first {
+                    self.household = firstHousehold
+                }
             }
             self.isSignedInWithApple = true
             self.lastSyncError = nil
@@ -2416,6 +2766,8 @@ public final class BlythesLifeStore {
         accessToken = nil
         refreshToken = nil
         isSignedInWithApple = false
+        isDemoPreview = false
+        sessionStage = .signedOut
         let message = "Session expired. Sign in again."
         lastSyncError = message
         syncStatus = .error(message)
@@ -2544,6 +2896,10 @@ public final class BlythesLifeStore {
     }
 
     private func persistState() {
+        // Never overwrite real on-disk state while previewing sample data in a live-configured app.
+        if isDemoPreview && apiClient != nil {
+            return
+        }
         let snapshot = PersistedAppState(
             profile: profile,
             household: household,
@@ -2558,7 +2914,9 @@ public final class BlythesLifeStore {
             colorMode: colorModePreference,
             authEmail: authEmail,
             displayName: displayName,
-            isSignedInWithApple: isSignedInWithApple
+            isSignedInWithApple: isSignedInWithApple,
+            hasCompletedHouseholdSetup: hasCompletedHouseholdSetup,
+            isDemoPreview: isDemoPreview
         )
         do {
             try storage.save(snapshot)
@@ -2569,7 +2927,11 @@ public final class BlythesLifeStore {
     }
 
     private func triggerBackgroundFlush() {
-        guard apiClient != nil, (accessToken != nil || refreshToken != nil) else { return }
+        guard apiClient != nil,
+              !isDemoPreview,
+              sessionStage == .ready,
+              (accessToken != nil || refreshToken != nil)
+        else { return }
         Task { [weak self] in
             await self?.flushOutbox()
         }
@@ -2614,6 +2976,32 @@ public final class BlythesLifeStore {
         let month = comps.month ?? 1
         let day = comps.day ?? 1
         return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    private static func selectPreferredHousehold(
+        from households: [HouseholdDTO],
+        profiles: [ProfileDTO]
+    ) -> HouseholdDTO? {
+        guard !households.isEmpty else { return nil }
+        let activeProfileHouseholdIds = Set(profiles.filter { $0.deletedAt == nil }.map(\.householdId))
+
+        var best = households[0]
+        var bestMembers = best.members?.count ?? 0
+        var bestHasProfile = activeProfileHouseholdIds.contains(best.id)
+
+        for candidate in households.dropFirst() {
+            let candidateMembers = candidate.members?.count ?? 0
+            let candidateHasProfile = activeProfileHouseholdIds.contains(candidate.id)
+
+            if candidateMembers > bestMembers
+                || (candidateMembers == bestMembers && candidateHasProfile && !bestHasProfile)
+            {
+                best = candidate
+                bestMembers = candidateMembers
+                bestHasProfile = candidateHasProfile
+            }
+        }
+        return best
     }
 
     private static func buildScanSubtitle(from drafts: [ScanReviewDraftItem]) -> String {

@@ -139,7 +139,7 @@ public struct TodayView: View {
                 Text("Today")
                     .blMicroLabel()
                 Spacer()
-                Text("\(count) \(entryNoun) · tap to edit")
+                Text(count == 0 ? "0 entries" : "\(count) \(entryNoun) · tap to edit")
                     .blMicroLabel()
             }
             .padding(.horizontal, BLSpacing.screenGutter)
@@ -169,6 +169,7 @@ public struct TodayView: View {
                         .blTextRole(.display)
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.85)
 
                     if !store.profileAgeLabel.isEmpty {
                         Text(store.profileAgeLabel)
@@ -179,6 +180,11 @@ public struct TodayView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if store.isDemoPreview {
+                BLBadge("Sample", tone: .neutral)
+                    .padding(.bottom, 10)
+            }
 
             if store.postureOverride != .automatic {
                 BLBadge(store.postureOverride.shortTitle, tone: .accent)
@@ -325,7 +331,7 @@ public struct TodayView: View {
             Text("Today")
                 .blMicroLabel()
             Spacer()
-            Text("\(count) \(entryNoun) · tap to edit")
+            Text(count == 0 ? "0 entries" : "\(count) \(entryNoun) · tap to edit")
                 .blMicroLabel()
         }
         .padding(.top, BLSpacing.space5)

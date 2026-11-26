@@ -21,6 +21,7 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
     public var resolvedOption: String?
     public var isIncluded: Bool
     public var boundingBox: NormalizedBoundingBox?
+    public var matchedEventId: UUID?
 
     public init(
         id: String,
@@ -40,7 +41,8 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
         ambiguityOptionDates: [String: Date] = [:],
         resolvedOption: String? = nil,
         isIncluded: Bool? = nil,
-        boundingBox: NormalizedBoundingBox? = nil
+        boundingBox: NormalizedBoundingBox? = nil,
+        matchedEventId: UUID? = nil
     ) {
         self.id = id
         self.rowKey = rowKey
@@ -58,8 +60,9 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
         self.ambiguityOptions = ambiguityOptions
         self.ambiguityOptionDates = ambiguityOptionDates
         self.resolvedOption = resolvedOption
-        self.isIncluded = isIncluded ?? (matchAction == .create && !isSuggestion)
+        self.isIncluded = isIncluded ?? ((matchAction == .create || matchAction == .updateExisting) && !isSuggestion)
         self.boundingBox = boundingBox
+        self.matchedEventId = matchedEventId
     }
 
     /// True when this draft is selected for saving and still requires a caregiver disambiguation choice.
@@ -116,6 +119,20 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
             updatedBy: UUID()
         )
 
+        let trimmedAmbiguity = extractedDraft.ambiguityReason?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let ambiguityQuestion = (trimmedAmbiguity?.isEmpty == false) ? trimmedAmbiguity : nil
+        let (ambiguityOptions, ambiguityOptionDates) = Self.parseAmbiguityOptions(
+            question: ambiguityQuestion,
+            confidence: extractedDraft.confidence,
+            anchorDate: extractedDraft.startedAt,
+            timeZone: timeZone
+        )
+
+        let shouldIncludePrimary =
+            (extractedDraft.matchAction == .create || extractedDraft.matchAction == .updateExisting)
+            && extractedDraft.suggestedByDraftId == nil
+
         let primary = ScanReviewDraftItem(
             id: extractedDraft.draftId.uuidString,
             rowKey: rowKey,
@@ -129,12 +146,13 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
             notes: extractedDraft.notes,
             matchAction: extractedDraft.matchAction,
             isSuggestion: extractedDraft.suggestedByDraftId != nil,
-            ambiguityQuestion: extractedDraft.ambiguityReason,
-            ambiguityOptions: [],
-            ambiguityOptionDates: [:],
+            ambiguityQuestion: ambiguityQuestion,
+            ambiguityOptions: ambiguityOptions,
+            ambiguityOptionDates: ambiguityOptionDates,
             resolvedOption: nil,
-            isIncluded: extractedDraft.matchAction == .create && extractedDraft.suggestedByDraftId == nil,
-            boundingBox: extractedDraft.boundingBox
+            isIncluded: shouldIncludePrimary,
+            boundingBox: extractedDraft.boundingBox,
+            matchedEventId: extractedDraft.matchedEventId
         )
 
         var items = [primary]
@@ -171,11 +189,140 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
                 ambiguityOptionDates: [:],
                 resolvedOption: nil,
                 isIncluded: false,
-                boundingBox: extractedDraft.boundingBox
+                boundingBox: extractedDraft.boundingBox,
+                matchedEventId: nil
             )
             items.append(suggestionDraft)
         }
         return items
+    }
+
+    // MARK: - Ambiguity Candidate Parser
+
+    /// Extracts interactive resolution chips from VLM `ambiguity_reason` strings.
+    /// When 2+ plausible clock times appear (e.g. `"could be 11:20 or 11:30"`), builds time options mapped to `Date`s;
+    /// otherwise surfaces a single `"Looks right"` confirmation chip for medium/low confidence ambiguities.
+    private static func parseAmbiguityOptions(
+        question: String?,
+        confidence: ConfidenceLevel,
+        anchorDate: Date,
+        timeZone: TimeZone
+    ) -> (options: [String], dates: [String: Date]) {
+        guard let question, !question.isEmpty else {
+            return ([], [:])
+        }
+
+        let pattern = #"\b(\d{1,2}):(\d{2})(?:\s*([AaPp][Mm]))?\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return (["Looks right"], ["Looks right": anchorDate])
+        }
+
+        let nsRange = NSRange(question.startIndex ..< question.endIndex, in: question)
+        let matches = regex.matches(in: question, range: nsRange)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let dayComps = calendar.dateComponents([.year, .month, .day], from: anchorDate)
+
+        var options: [String] = []
+        var optionDates: [String: Date] = [:]
+
+        for match in matches {
+            guard let hourRange = Range(match.range(at: 1), in: question),
+                  let minuteRange = Range(match.range(at: 2), in: question),
+                  let rawHour = Int(question[hourRange]),
+                  let minute = Int(question[minuteRange]),
+                  (0 ... 59).contains(minute)
+            else {
+                continue
+            }
+
+            let meridiem: String? = {
+                guard match.range(at: 3).location != NSNotFound,
+                      let mRange = Range(match.range(at: 3), in: question)
+                else {
+                    return nil
+                }
+                return question[mRange].uppercased()
+            }()
+
+            let candidateDate: Date?
+            if let meridiem, (1 ... 12).contains(rawHour) {
+                var hour24 = rawHour % 12
+                if meridiem == "PM" { hour24 += 12 }
+                candidateDate = calendar.date(
+                    from: DateComponents(
+                        timeZone: timeZone,
+                        year: dayComps.year,
+                        month: dayComps.month,
+                        day: dayComps.day,
+                        hour: hour24,
+                        minute: minute
+                    )
+                )
+            } else if (13 ... 23).contains(rawHour) || rawHour == 0 {
+                candidateDate = calendar.date(
+                    from: DateComponents(
+                        timeZone: timeZone,
+                        year: dayComps.year,
+                        month: dayComps.month,
+                        day: dayComps.day,
+                        hour: rawHour,
+                        minute: minute
+                    )
+                )
+            } else if (1 ... 12).contains(rawHour) {
+                let amHour = rawHour % 12
+                let pmHour = amHour + 12
+                let amDate = calendar.date(
+                    from: DateComponents(
+                        timeZone: timeZone,
+                        year: dayComps.year,
+                        month: dayComps.month,
+                        day: dayComps.day,
+                        hour: amHour,
+                        minute: minute
+                    )
+                )
+                let pmDate = calendar.date(
+                    from: DateComponents(
+                        timeZone: timeZone,
+                        year: dayComps.year,
+                        month: dayComps.month,
+                        day: dayComps.day,
+                        hour: pmHour,
+                        minute: minute
+                    )
+                )
+                if let amDate, let pmDate {
+                    candidateDate = abs(amDate.timeIntervalSince(anchorDate)) <= abs(pmDate.timeIntervalSince(anchorDate))
+                        ? amDate
+                        : pmDate
+                } else {
+                    candidateDate = amDate ?? pmDate
+                }
+            } else {
+                candidateDate = nil
+            }
+
+            if let candidateDate {
+                let label = FormattingHelpers.formatClock(candidateDate, timeZone: timeZone)
+                if optionDates[label] == nil {
+                    options.append(label)
+                    optionDates[label] = candidateDate
+                }
+            }
+        }
+
+        if options.count >= 2 {
+            return (options, optionDates)
+        }
+
+        if confidence != .high || !question.isEmpty {
+            return (["Looks right"], ["Looks right": anchorDate])
+        }
+
+        return ([], [:])
     }
 }
 
@@ -217,6 +364,8 @@ public struct ScannedSheetRecord: Codable, Sendable, Identifiable, Equatable {
     public var previewLines: [ScannedSheetLinePreview]
     public var imageData: Data?
     public var confirmedEntryCount: Int
+    public var scanDate: String?
+    public var sheetNotes: String?
 
     public init(
         id: UUID = UUID(),
@@ -228,7 +377,9 @@ public struct ScannedSheetRecord: Codable, Sendable, Identifiable, Equatable {
         drafts: [ScanReviewDraftItem] = [],
         previewLines: [ScannedSheetLinePreview] = [],
         imageData: Data? = nil,
-        confirmedEntryCount: Int = 0
+        confirmedEntryCount: Int = 0,
+        scanDate: String? = nil,
+        sheetNotes: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -240,6 +391,8 @@ public struct ScannedSheetRecord: Codable, Sendable, Identifiable, Equatable {
         self.previewLines = previewLines
         self.imageData = imageData
         self.confirmedEntryCount = confirmedEntryCount
+        self.scanDate = scanDate
+        self.sheetNotes = sheetNotes
     }
 
     public var orderedDrafts: [ScanReviewDraftItem] {

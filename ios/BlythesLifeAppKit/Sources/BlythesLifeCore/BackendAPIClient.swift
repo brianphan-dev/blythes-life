@@ -33,16 +33,68 @@ public enum BackendAPIError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+/// Live server health response returned by `GET /health`.
+public struct BackendHealthResponse: Codable, Sendable, Equatable, Hashable {
+    public var status: String
+    public var database: String
+    public var storage: String
+    public var extractionModel: String
+    public var vlmConfigured: Bool
+
+    public init(
+        status: String,
+        database: String,
+        storage: String,
+        extractionModel: String,
+        vlmConfigured: Bool
+    ) {
+        self.status = status
+        self.database = database
+        self.storage = storage
+        self.extractionModel = extractionModel
+        self.vlmConfigured = vlmConfigured
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case database
+        case storage
+        case extractionModel = "extraction_model"
+        case vlmConfigured = "vlm_configured"
+    }
+}
+
+/// Authenticated user and household summary returned by `GET /v1/auth/me`.
+public struct AuthMeResponse: Codable, Sendable, Equatable, Hashable {
+    public var user: UserDTO
+    public var households: [HouseholdDTO]
+
+    public init(user: UserDTO, households: [HouseholdDTO]) {
+        self.user = user
+        self.households = households
+    }
+}
+
 /// Async API protocol targeting the Blythe's Life Swift/PostgreSQL backend.
 public protocol BackendAPIProviding: Sendable {
+    var baseURL: URL { get }
+
+    func fetchHealth() async throws -> BackendHealthResponse
+
     func signInWithApple(_ request: AppleAuthRequest) async throws -> AuthSessionResponse
     func refreshSession(_ request: RefreshTokenRequest) async throws -> AuthSessionResponse
     func logout(_ request: LogoutRequest, accessToken: String?) async throws
+    func fetchMe(accessToken: String) async throws -> AuthMeResponse
     func deleteAccount(accessToken: String) async throws
 
+    func listHouseholds(accessToken: String) async throws -> [HouseholdDTO]
     func createHousehold(name: String, accessToken: String) async throws -> HouseholdDTO
     func joinHousehold(inviteCode: String, displayName: String?, accessToken: String) async throws -> HouseholdDTO
     func rotateInviteCode(householdId: UUID, accessToken: String) async throws -> HouseholdDTO
+
+    func listProfiles(accessToken: String) async throws -> [ProfileDTO]
+    func createProfile(_ request: CreateProfileRequest, accessToken: String) async throws -> ProfileDTO
+    func updateProfile(profileId: UUID, request: UpdateProfileRequest, accessToken: String) async throws -> ProfileDTO
 
     func syncPush(_ request: SyncPushRequest, accessToken: String) async throws -> SyncPushResponse
     func syncPull(since: Date?, limit: Int, accessToken: String) async throws -> SyncPullResponse
@@ -52,22 +104,23 @@ public protocol BackendAPIProviding: Sendable {
     func uploadScanBytes(to uploadURL: URL, headers: [String: String], data: Data) async throws
     func extractScan(_ request: ExtractPaperScanRequest, accessToken: String) async throws -> PaperScanDTO
     func confirmScan(_ request: ConfirmPaperScanRequest, accessToken: String) async throws -> PaperScanDTO
+    func getScan(scanId: UUID, accessToken: String) async throws -> PaperScanDTO
 
-    func exportJSON(accessToken: String) async throws -> Data
-    func exportCSV(profileId: UUID?, accessToken: String) async throws -> Data
+    func exportJSON(profileId: UUID, accessToken: String) async throws -> Data
+    func exportCSV(profileId: UUID, accessToken: String) async throws -> Data
 }
 
 public extension BackendAPIProviding {
+    var baseURL: URL {
+        URLSessionBackendAPIClient.defaultBaseURL
+    }
+
     func logout(_ request: LogoutRequest) async throws {
         try await logout(request, accessToken: nil)
     }
 
     func syncPull(since: Date?, accessToken: String) async throws -> SyncPullResponse {
         try await syncPull(since: since, limit: 500, accessToken: accessToken)
-    }
-
-    func exportCSV(accessToken: String) async throws -> Data {
-        try await exportCSV(profileId: nil, accessToken: accessToken)
     }
 }
 
@@ -86,7 +139,7 @@ public struct SyncSSEParser: Sendable {
             return flush()
         }
 
-        // Ignore SSE comments (`: keepalive`) and metadata fields (`event:`, `id:`, `retry:`).
+        // Ignore SSE comments (`: keepalive`, `: connected`) and metadata fields (`event:`, `id:`, `retry:`).
         if trimmed.hasPrefix(":") {
             return nil
         }
@@ -135,7 +188,19 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         self.session = session
     }
 
-    // MARK: - Auth
+    // MARK: - Health
+
+    public func fetchHealth() async throws -> BackendHealthResponse {
+        try await sendJSON(
+            method: "GET",
+            path: "/health",
+            body: Optional<String>.none,
+            accessToken: nil,
+            timeoutInterval: 15
+        )
+    }
+
+    // MARK: - Auth & Account
 
     public func signInWithApple(_ request: AppleAuthRequest) async throws -> AuthSessionResponse {
         try await sendJSON(
@@ -164,16 +229,34 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         )
     }
 
+    public func fetchMe(accessToken: String) async throws -> AuthMeResponse {
+        try await sendJSON(
+            method: "GET",
+            path: "/v1/auth/me",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
     public func deleteAccount(accessToken: String) async throws {
         _ = try await sendEmptyResponse(
             method: "DELETE",
-            path: "/v1/auth/account",
+            path: "/v1/account",
             body: Optional<String>.none,
             accessToken: accessToken
         )
     }
 
     // MARK: - Households
+
+    public func listHouseholds(accessToken: String) async throws -> [HouseholdDTO] {
+        try await sendJSON(
+            method: "GET",
+            path: "/v1/households",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
 
     public func createHousehold(name: String, accessToken: String) async throws -> HouseholdDTO {
         try await sendJSON(
@@ -200,8 +283,41 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
     public func rotateInviteCode(householdId: UUID, accessToken: String) async throws -> HouseholdDTO {
         try await sendJSON(
             method: "POST",
-            path: "/v1/households/\(householdId.uuidString)/invite/rotate",
+            path: "/v1/households/\(householdId.uuidString.lowercased())/invite",
             body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
+    // MARK: - Profiles
+
+    public func listProfiles(accessToken: String) async throws -> [ProfileDTO] {
+        try await sendJSON(
+            method: "GET",
+            path: "/v1/profiles",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
+    public func createProfile(_ request: CreateProfileRequest, accessToken: String) async throws -> ProfileDTO {
+        try await sendJSON(
+            method: "POST",
+            path: "/v1/profiles",
+            body: request,
+            accessToken: accessToken
+        )
+    }
+
+    public func updateProfile(
+        profileId: UUID,
+        request: UpdateProfileRequest,
+        accessToken: String
+    ) async throws -> ProfileDTO {
+        try await sendJSON(
+            method: "PATCH",
+            path: "/v1/profiles/\(profileId.uuidString.lowercased())",
+            body: request,
             accessToken: accessToken
         )
     }
@@ -291,6 +407,7 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
     public func uploadScanBytes(to uploadURL: URL, headers: [String: String], data: Data) async throws {
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "PUT"
+        request.timeoutInterval = 120
         request.httpBody = data
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
@@ -313,40 +430,46 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
             method: "POST",
             path: "/v1/scans/extract",
             body: request,
-            accessToken: accessToken
+            accessToken: accessToken,
+            timeoutInterval: 120
         )
     }
 
     public func confirmScan(_ request: ConfirmPaperScanRequest, accessToken: String) async throws -> PaperScanDTO {
         try await sendJSON(
             method: "POST",
-            path: "/v1/scans/confirm",
+            path: "/v1/scans/\(request.scanId.uuidString.lowercased())/confirm",
             body: request,
+            accessToken: accessToken
+        )
+    }
+
+    public func getScan(scanId: UUID, accessToken: String) async throws -> PaperScanDTO {
+        try await sendJSON(
+            method: "GET",
+            path: "/v1/scans/\(scanId.uuidString.lowercased())",
+            body: Optional<String>.none,
             accessToken: accessToken
         )
     }
 
     // MARK: - Export
 
-    public func exportJSON(accessToken: String) async throws -> Data {
+    public func exportJSON(profileId: UUID, accessToken: String) async throws -> Data {
         try await fetchRawData(
             method: "GET",
-            path: "/v1/export/json",
+            path: "/v1/profiles/\(profileId.uuidString.lowercased())/export/json",
             queryItems: [],
             accept: "application/json",
             accessToken: accessToken
         )
     }
 
-    public func exportCSV(profileId: UUID?, accessToken: String) async throws -> Data {
-        var queryItems: [URLQueryItem] = []
-        if let profileId {
-            queryItems.append(URLQueryItem(name: "profile_id", value: profileId.uuidString))
-        }
-        return try await fetchRawData(
+    public func exportCSV(profileId: UUID, accessToken: String) async throws -> Data {
+        try await fetchRawData(
             method: "GET",
-            path: "/v1/export/csv",
-            queryItems: queryItems,
+            path: "/v1/profiles/\(profileId.uuidString.lowercased())/export/csv",
+            queryItems: [],
             accept: "text/csv",
             accessToken: accessToken
         )
@@ -359,7 +482,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         path: String,
         queryItems: [URLQueryItem] = [],
         body: Body?,
-        accessToken: String?
+        accessToken: String?,
+        timeoutInterval: TimeInterval = 60
     ) async throws -> Response {
         let data = try await executeRequest(
             method: method,
@@ -367,7 +491,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
             queryItems: queryItems,
             body: body,
             accept: "application/json",
-            accessToken: accessToken
+            accessToken: accessToken,
+            timeoutInterval: timeoutInterval
         )
         do {
             return try BlythesLifeJSONCoding.makeDecoder().decode(Response.self, from: data)
@@ -380,7 +505,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         method: String,
         path: String,
         body: Body?,
-        accessToken: String?
+        accessToken: String?,
+        timeoutInterval: TimeInterval = 60
     ) async throws -> Data {
         try await executeRequest(
             method: method,
@@ -388,7 +514,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
             queryItems: [],
             body: body,
             accept: "application/json",
-            accessToken: accessToken
+            accessToken: accessToken,
+            timeoutInterval: timeoutInterval
         )
     }
 
@@ -397,7 +524,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         path: String,
         queryItems: [URLQueryItem],
         accept: String,
-        accessToken: String
+        accessToken: String,
+        timeoutInterval: TimeInterval = 60
     ) async throws -> Data {
         try await executeRequest(
             method: method,
@@ -405,7 +533,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
             queryItems: queryItems,
             body: Optional<String>.none,
             accept: accept,
-            accessToken: accessToken
+            accessToken: accessToken,
+            timeoutInterval: timeoutInterval
         )
     }
 
@@ -415,7 +544,8 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         queryItems: [URLQueryItem],
         body: Body?,
         accept: String,
-        accessToken: String?
+        accessToken: String?,
+        timeoutInterval: TimeInterval = 60
     ) async throws -> Data {
         guard let url = Self.buildURL(baseURL: baseURL, path: path, queryItems: queryItems) else {
             throw BackendAPIError.invalidURL
@@ -423,6 +553,7 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.timeoutInterval = timeoutInterval
         request.setValue(accept, forHTTPHeaderField: "Accept")
         if let accessToken {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -467,8 +598,27 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
             if httpResponse.statusCode == 401 {
                 throw BackendAPIError.unauthorized
             }
-            let message = bodyData.flatMap { String(data: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = extractServerErrorMessage(from: bodyData)
             throw BackendAPIError.httpError(statusCode: httpResponse.statusCode, message: message)
         }
+    }
+
+    private static func extractServerErrorMessage(from bodyData: Data?) -> String? {
+        guard let bodyData, !bodyData.isEmpty else { return nil }
+        if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+            if let errorObj = json["error"] as? [String: Any],
+               let msg = errorObj["message"] as? String,
+               !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                return msg.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let msg = json["message"] as? String,
+               !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                return msg.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        let raw = String(data: bodyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw?.isEmpty == false ? raw : nil
     }
 }

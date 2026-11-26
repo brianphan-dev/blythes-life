@@ -328,14 +328,20 @@ public enum FormattingHelpers: Sendable {
             return parts.joined(separator: " · ")
 
         case .medicine(let meta):
-            if meta.category == .topical || meta.dose == nil {
+            if meta.category == .topical {
                 var parts = ["Topical"]
                 if let nonEmptyNote {
                     parts.append(nonEmptyNote)
                 }
                 return parts.joined(separator: " · ")
             }
-            let doseValue = meta.dose ?? 0
+            guard let doseValue = meta.dose else {
+                var parts = [meta.category.rawValue.capitalized]
+                if let nonEmptyNote {
+                    parts.append(nonEmptyNote)
+                }
+                return parts.joined(separator: " · ")
+            }
             let doseNumber = formatNumber(doseValue, maxFractionDigits: 2)
             let unitLabel = formatDoseUnit(dose: doseValue, unit: meta.unit)
             let doseSegment = unitLabel.isEmpty ? doseNumber : "\(doseNumber) \(unitLabel)"

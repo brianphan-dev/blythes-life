@@ -2,7 +2,10 @@ import BlythesLifeCore
 import BlythesLifeShared
 import CoreGraphics
 import Foundation
+import ImageIO
+import os
 import Testing
+import UniformTypeIdentifiers
 
 // MARK: - Helpers
 
@@ -22,32 +25,233 @@ private func makeDate(
     )!
 }
 
+private func makeSyntheticPNG(width: Int, height: Int) -> Data {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+    let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: colorSpace,
+        bitmapInfo: bitmapInfo
+    )!
+    context.setFillColor(red: 0.96, green: 0.94, blue: 0.90, alpha: 1.0)
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    context.setFillColor(red: 0.15, green: 0.20, blue: 0.45, alpha: 1.0)
+    context.fill(CGRect(x: 40, y: 40, width: max(1, width / 2), height: max(1, height / 4)))
+    let image = context.makeImage()!
+
+    let mutableData = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(
+        mutableData as CFMutableData,
+        UTType.png.identifier as CFString,
+        1,
+        nil
+    )!
+    CGImageDestinationAddImage(destination, image, nil)
+    CGImageDestinationFinalize(destination)
+    return mutableData as Data
+}
+
+// MARK: - Configurable Mock Backend API
+
 private final class MockBackendAPI: BackendAPIProviding, Sendable {
+    struct State: Sendable {
+        var healthResponse = BackendHealthResponse(
+            status: "ok",
+            database: "postgres",
+            storage: "r2",
+            extractionModel: "google/gemini-3-flash-preview",
+            vlmConfigured: true
+        )
+        var signInHandler: (@Sendable (AppleAuthRequest) throws -> AuthSessionResponse)?
+        var refreshHandler: (@Sendable (RefreshTokenRequest) throws -> AuthSessionResponse)?
+        var meHandler: (@Sendable (String) throws -> AuthMeResponse)?
+        var deleteAccountHandler: (@Sendable (String) throws -> Void)?
+        var createHouseholdHandler: (@Sendable (String, String) throws -> HouseholdDTO)?
+        var joinHouseholdHandler: (@Sendable (String, String?, String) throws -> HouseholdDTO)?
+        var rotateInviteHandler: (@Sendable (UUID, String) throws -> HouseholdDTO)?
+        var listProfilesHandler: (@Sendable (String) throws -> [ProfileDTO])?
+        var createProfileHandler: (@Sendable (CreateProfileRequest, String) throws -> ProfileDTO)?
+        var syncPushHandler: (@Sendable (SyncPushRequest, String) throws -> SyncPushResponse)?
+        var syncPullHandler: (@Sendable (Date?, Int, String) throws -> SyncPullResponse)?
+        var presignHandler: (@Sendable (PresignUploadRequest, String) throws -> PresignUploadResponse)?
+        var extractHandler: (@Sendable (ExtractPaperScanRequest, String) throws -> PaperScanDTO)?
+        var confirmHandler: (@Sendable (ConfirmPaperScanRequest, String) throws -> PaperScanDTO)?
+
+        var recordedCalls: [String] = []
+        var uploadedBytes: [(url: URL, headers: [String: String], data: Data)] = []
+        var pushedRequests: [SyncPushRequest] = []
+        var confirmedScanRequests: [ConfirmPaperScanRequest] = []
+        var refreshRequests: [RefreshTokenRequest] = []
+        var joinRequests: [(inviteCode: String, displayName: String?)] = []
+        var deleteAccountCallCount: Int = 0
+        var logoutCallCount: Int = 0
+    }
+
+    let state = OSAllocatedUnfairLock<State>(initialState: State())
+    let baseURL: URL
+
+    init(baseURL: URL = URLSessionBackendAPIClient.defaultBaseURL) {
+        self.baseURL = baseURL
+    }
+
+    func fetchHealth() async throws -> BackendHealthResponse {
+        state.withLock {
+            $0.recordedCalls.append("GET /health")
+            return $0.healthResponse
+        }
+    }
+
     func signInWithApple(_ request: AppleAuthRequest) async throws -> AuthSessionResponse {
+        let handler = state.withLock { s -> (@Sendable (AppleAuthRequest) throws -> AuthSessionResponse)? in
+            s.recordedCalls.append("POST /v1/auth/apple")
+            return s.signInHandler
+        }
+        if let handler {
+            return try handler(request)
+        }
         throw BackendAPIError.unauthorized
     }
 
     func refreshSession(_ request: RefreshTokenRequest) async throws -> AuthSessionResponse {
+        let handler = state.withLock { s -> (@Sendable (RefreshTokenRequest) throws -> AuthSessionResponse)? in
+            s.recordedCalls.append("POST /v1/auth/refresh")
+            s.refreshRequests.append(request)
+            return s.refreshHandler
+        }
+        if let handler {
+            return try handler(request)
+        }
         throw BackendAPIError.unauthorized
     }
 
-    func logout(_ request: LogoutRequest, accessToken: String?) async throws {}
-    func deleteAccount(accessToken: String) async throws {}
+    func logout(_ request: LogoutRequest, accessToken: String?) async throws {
+        state.withLock {
+            $0.recordedCalls.append("POST /v1/auth/logout")
+            $0.logoutCallCount += 1
+        }
+    }
+
+    func fetchMe(accessToken: String) async throws -> AuthMeResponse {
+        let handler = state.withLock { s -> (@Sendable (String) throws -> AuthMeResponse)? in
+            s.recordedCalls.append("GET /v1/auth/me")
+            return s.meHandler
+        }
+        if let handler {
+            return try handler(accessToken)
+        }
+        let user = UserDTO(id: SampleSeedData.ownerUserId, displayName: "Brian", primaryEmail: "brian@icloud.com")
+        return AuthMeResponse(user: user, households: [])
+    }
+
+    func deleteAccount(accessToken: String) async throws {
+        let handler = state.withLock { s -> (@Sendable (String) throws -> Void)? in
+            s.recordedCalls.append("DELETE /v1/account")
+            s.deleteAccountCallCount += 1
+            return s.deleteAccountHandler
+        }
+        if let handler {
+            try handler(accessToken)
+        }
+    }
+
+    func listHouseholds(accessToken: String) async throws -> [HouseholdDTO] {
+        state.withLock {
+            $0.recordedCalls.append("GET /v1/households")
+        }
+        return []
+    }
 
     func createHousehold(name: String, accessToken: String) async throws -> HouseholdDTO {
-        HouseholdDTO(name: name, createdBy: SampleSeedData.ownerUserId)
+        let handler = state.withLock { s -> (@Sendable (String, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append("POST /v1/households")
+            return s.createHouseholdHandler
+        }
+        if let handler {
+            return try handler(name, accessToken)
+        }
+        return HouseholdDTO(name: name, inviteCode: "654321", createdBy: SampleSeedData.ownerUserId)
     }
 
     func joinHousehold(inviteCode: String, displayName: String?, accessToken: String) async throws -> HouseholdDTO {
-        HouseholdDTO(name: "Joined", inviteCode: inviteCode, createdBy: SampleSeedData.ownerUserId)
+        let handler = state.withLock { s -> (@Sendable (String, String?, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append("POST /v1/households/join")
+            s.joinRequests.append((inviteCode, displayName))
+            return s.joinHouseholdHandler
+        }
+        if let handler {
+            return try handler(inviteCode, displayName, accessToken)
+        }
+        return HouseholdDTO(name: "Joined", inviteCode: inviteCode, createdBy: SampleSeedData.ownerUserId)
     }
 
     func rotateInviteCode(householdId: UUID, accessToken: String) async throws -> HouseholdDTO {
-        HouseholdDTO(id: householdId, name: "Rotated", inviteCode: "112233", createdBy: SampleSeedData.ownerUserId)
+        let handler = state.withLock { s -> (@Sendable (UUID, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append("POST /v1/households/\(householdId.uuidString.lowercased())/invite")
+            return s.rotateInviteHandler
+        }
+        if let handler {
+            return try handler(householdId, accessToken)
+        }
+        return HouseholdDTO(id: householdId, name: "Rotated", inviteCode: "112233", createdBy: SampleSeedData.ownerUserId)
+    }
+
+    func listProfiles(accessToken: String) async throws -> [ProfileDTO] {
+        let handler = state.withLock { s -> (@Sendable (String) throws -> [ProfileDTO])? in
+            s.recordedCalls.append("GET /v1/profiles")
+            return s.listProfilesHandler
+        }
+        if let handler {
+            return try handler(accessToken)
+        }
+        return []
+    }
+
+    func createProfile(_ request: CreateProfileRequest, accessToken: String) async throws -> ProfileDTO {
+        let handler = state.withLock { s -> (@Sendable (CreateProfileRequest, String) throws -> ProfileDTO)? in
+            s.recordedCalls.append("POST /v1/profiles")
+            return s.createProfileHandler
+        }
+        if let handler {
+            return try handler(request, accessToken)
+        }
+        return ProfileDTO(
+            id: request.id ?? UUID(),
+            householdId: request.householdId,
+            displayName: request.displayName,
+            birthDate: request.birthDate,
+            defaultTimezone: request.defaultTimezone,
+            scheduleConfig: request.scheduleConfig ?? ScheduleConfig()
+        )
+    }
+
+    func updateProfile(profileId: UUID, request: UpdateProfileRequest, accessToken: String) async throws -> ProfileDTO {
+        state.withLock {
+            $0.recordedCalls.append("PATCH /v1/profiles/\(profileId.uuidString.lowercased())")
+        }
+        return ProfileDTO(
+            id: profileId,
+            householdId: SampleSeedData.householdId,
+            displayName: request.displayName ?? "Blythe",
+            birthDate: request.birthDate,
+            defaultTimezone: request.defaultTimezone ?? SampleSeedData.defaultTimeZoneIdentifier,
+            scheduleConfig: request.scheduleConfig ?? ScheduleConfig()
+        )
     }
 
     func syncPush(_ request: SyncPushRequest, accessToken: String) async throws -> SyncPushResponse {
-        SyncPushResponse(
+        let handler = state.withLock { s -> (@Sendable (SyncPushRequest, String) throws -> SyncPushResponse)? in
+            s.recordedCalls.append("POST /v1/sync/push")
+            s.pushedRequests.append(request)
+            return s.syncPushHandler
+        }
+        if let handler {
+            return try handler(request, accessToken)
+        }
+        return SyncPushResponse(
             acceptedEventIds: request.events.map(\.id),
             acceptedProfileIds: (request.profiles ?? []).map(\.id),
             rejected: [],
@@ -56,7 +260,14 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
     }
 
     func syncPull(since: Date?, limit: Int, accessToken: String) async throws -> SyncPullResponse {
-        SyncPullResponse(
+        let handler = state.withLock { s -> (@Sendable (Date?, Int, String) throws -> SyncPullResponse)? in
+            s.recordedCalls.append("GET /v1/sync/pull")
+            return s.syncPullHandler
+        }
+        if let handler {
+            return try handler(since, limit, accessToken)
+        }
+        return SyncPullResponse(
             events: [],
             profiles: [],
             serverWatermark: makeDate(hour: 13, minute: 0),
@@ -65,22 +276,45 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
     }
 
     func syncStream(accessToken: String) -> AsyncThrowingStream<SyncStreamNotification, Error> {
-        AsyncThrowingStream { $0.finish() }
+        state.withLock {
+            $0.recordedCalls.append("GET /v1/sync/stream")
+        }
+        return AsyncThrowingStream { $0.finish() }
     }
 
     func presignScan(_ request: PresignUploadRequest, accessToken: String) async throws -> PresignUploadResponse {
-        PresignUploadResponse(
+        let handler = state.withLock { s -> (@Sendable (PresignUploadRequest, String) throws -> PresignUploadResponse)? in
+            s.recordedCalls.append("POST /v1/scans/presign")
+            return s.presignHandler
+        }
+        if let handler {
+            return try handler(request, accessToken)
+        }
+        return PresignUploadResponse(
             scanId: UUID(),
             storageKey: "scans/demo.jpg",
             uploadUrl: "https://r2.example.com/upload",
+            uploadHeaders: ["Content-Type": request.contentType],
             expiresAt: Date().addingTimeInterval(300)
         )
     }
 
-    func uploadScanBytes(to uploadURL: URL, headers: [String: String], data: Data) async throws {}
+    func uploadScanBytes(to uploadURL: URL, headers: [String: String], data: Data) async throws {
+        state.withLock {
+            $0.recordedCalls.append("PUT \(uploadURL.absoluteString)")
+            $0.uploadedBytes.append((uploadURL, headers, data))
+        }
+    }
 
     func extractScan(_ request: ExtractPaperScanRequest, accessToken: String) async throws -> PaperScanDTO {
-        PaperScanDTO(
+        let handler = state.withLock { s -> (@Sendable (ExtractPaperScanRequest, String) throws -> PaperScanDTO)? in
+            s.recordedCalls.append("POST /v1/scans/extract")
+            return s.extractHandler
+        }
+        if let handler {
+            return try handler(request, accessToken)
+        }
+        return PaperScanDTO(
             id: request.scanId,
             profileId: request.profileId,
             scanDate: request.scanDate ?? "2026-11-25",
@@ -91,7 +325,15 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
     }
 
     func confirmScan(_ request: ConfirmPaperScanRequest, accessToken: String) async throws -> PaperScanDTO {
-        PaperScanDTO(
+        let handler = state.withLock { s -> (@Sendable (ConfirmPaperScanRequest, String) throws -> PaperScanDTO)? in
+            s.recordedCalls.append("POST /v1/scans/\(request.scanId.uuidString.lowercased())/confirm")
+            s.confirmedScanRequests.append(request)
+            return s.confirmHandler
+        }
+        if let handler {
+            return try handler(request, accessToken)
+        }
+        return PaperScanDTO(
             id: request.scanId,
             profileId: request.profileId,
             scanDate: request.scanDate,
@@ -102,8 +344,140 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
         )
     }
 
-    func exportJSON(accessToken: String) async throws -> Data { Data() }
-    func exportCSV(profileId: UUID?, accessToken: String) async throws -> Data { Data() }
+    func getScan(scanId: UUID, accessToken: String) async throws -> PaperScanDTO {
+        state.withLock {
+            $0.recordedCalls.append("GET /v1/scans/\(scanId.uuidString.lowercased())")
+        }
+        return PaperScanDTO(
+            id: scanId,
+            profileId: SampleSeedData.profileId,
+            scanDate: "2026-11-25",
+            timezone: SampleSeedData.defaultTimeZoneIdentifier,
+            storageKey: "scans/demo.jpg",
+            scannedBy: SampleSeedData.ownerUserId
+        )
+    }
+
+    func exportJSON(profileId: UUID, accessToken: String) async throws -> Data {
+        state.withLock {
+            $0.recordedCalls.append("GET /v1/profiles/\(profileId.uuidString.lowercased())/export/json")
+        }
+        return Data()
+    }
+
+    func exportCSV(profileId: UUID, accessToken: String) async throws -> Data {
+        state.withLock {
+            $0.recordedCalls.append("GET /v1/profiles/\(profileId.uuidString.lowercased())/export/csv")
+        }
+        return Data()
+    }
+}
+
+// MARK: - URLProtocol Stub for Live Route Verification
+
+private struct CapturedHTTPRequest: Sendable {
+    let method: String
+    let path: String
+    let query: String?
+    let authorization: String?
+    let contentType: String?
+    let body: Data
+}
+
+private final class RouteCapturingURLProtocol: URLProtocol, @unchecked Sendable {
+    private struct Storage: Sendable {
+        var requests: [CapturedHTTPRequest] = []
+        var responder: (@Sendable (URLRequest) -> (Int, Data, [String: String]))?
+    }
+
+    private static let storage = OSAllocatedUnfairLock<Storage>(initialState: Storage())
+
+    static func configure(
+        responder: @escaping @Sendable (URLRequest) -> (Int, Data, [String: String])
+    ) {
+        storage.withLock {
+            $0.requests = []
+            $0.responder = responder
+        }
+    }
+
+    static func recordedRequests() -> [CapturedHTTPRequest] {
+        storage.withLock { $0.requests }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let bodyData = Self.readBody(from: request)
+        let components = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        let captured = CapturedHTTPRequest(
+            method: request.httpMethod ?? "GET",
+            path: components?.path ?? "",
+            query: components?.query,
+            authorization: request.value(forHTTPHeaderField: "Authorization"),
+            contentType: request.value(forHTTPHeaderField: "Content-Type"),
+            body: bodyData
+        )
+
+        let responder = Self.storage.withLock { state -> (@Sendable (URLRequest) -> (Int, Data, [String: String]))? in
+            state.requests.append(captured)
+            return state.responder
+        }
+
+        let (statusCode, data, headers) = responder?(request) ?? (200, Data("{}".utf8), [:])
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://api.blythe.brianphan.dev")!,
+            statusCode: statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        )!
+
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if !data.isEmpty {
+            client?.urlProtocol(self, didLoad: data)
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func readBody(from request: URLRequest) -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return Data()
+        }
+        stream.open()
+        defer { stream.close() }
+        var result = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count > 0 {
+                result.append(buffer, count: count)
+            } else {
+                break
+            }
+        }
+        return result
+    }
+}
+
+private func makeMockURLSessionClient() -> URLSessionBackendAPIClient {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [RouteCapturingURLProtocol.self]
+    let session = URLSession(configuration: config)
+    return URLSessionBackendAPIClient(
+        baseURL: URL(string: "https://api.blythe.brianphan.dev")!,
+        session: session
+    )
 }
 
 // MARK: - Formatting Tests
@@ -159,7 +533,6 @@ struct DuoPostureResolverTests {
         #expect(!portrait.usesSplitLayout)
         #expect(!portrait.shouldForceNightMode)
 
-        // Landscape iPhone Pro Max has regular horizontal size class, but height < 600.
         let landscapeProMax = DuoPostureResolver.resolve(
             containerSize: CGSize(width: 932, height: 430),
             horizontalSizeClass: .regular,
@@ -276,7 +649,6 @@ struct BlythesLifeStoreTests {
         #expect(store.todayEvents.count == 8)
         #expect(store.pendingReviewSheet?.title == "Grandma's sheet, 12:50 PM")
 
-        // At 12:54 PM after Nap 1 ending at 10:32 AM: awake 2h 22m, Nap 2 sweet spot 1:47 PM · in 53m
         let napCard = store.napCardState
         #expect(napCard.mode == .awake)
         #expect(napCard.label == "Awake · since 10:32 AM")
@@ -298,7 +670,6 @@ struct BlythesLifeStoreTests {
         let initialTodayCount = store.todayEvents.count
         let initialOutbox = store.outboxCount
 
-        // Start nap at 12:54 PM
         let startedEvent = store.toggleNap()
         #expect(startedEvent == nil)
         #expect(store.activeNapStart == store.now)
@@ -306,11 +677,9 @@ struct BlythesLifeStoreTests {
         #expect(store.napCardState.primaryActionLabel == "Wake up")
         #expect(store.napCardState.secondaryActionLabel == "Change start time")
 
-        // Undo start cancels timer cleanly
         store.undoLastToast()
         #expect(store.activeNapStart == nil)
 
-        // Start again, advance 50 minutes, wake up
         store.toggleNap()
         store.tick(now: store.now.addingTimeInterval(50 * 60))
         #expect(store.napCardState.elapsedText == "50m")
@@ -322,7 +691,6 @@ struct BlythesLifeStoreTests {
         #expect(store.outboxCount == initialOutbox + 1)
         #expect(store.toast?.message == "Nap 2 saved")
 
-        // Undo waking up removes saved nap and restores active nap timer
         store.undoLastToast()
         #expect(store.todayEvents.count == initialTodayCount)
         #expect(store.activeNapStart != nil)
@@ -333,23 +701,19 @@ struct BlythesLifeStoreTests {
         let store = BlythesLifeStore.makeDemo()
         let t0 = store.now
 
-        // Tap left -> runs 120s
         store.tapNursingSide(.left)
         #expect(store.activeNursing?.activeSide == .left)
 
         store.tick(now: t0.addingTimeInterval(120))
-        // Switch to right -> runs 180s
         store.tapNursingSide(.right)
         #expect(store.activeNursing?.activeSide == .right)
         #expect(store.activeNursing?.leftAccumulatedSeconds == 120)
 
         store.tick(now: t0.addingTimeInterval(300))
-        // Tap right again -> pauses
         store.tapNursingSide(.right)
         #expect(store.activeNursing?.activeSide == nil)
         #expect(store.activeNursing?.rightAccumulatedSeconds == 180)
 
-        // Discard + Undo restores paused session
         store.discardNursing()
         #expect(store.activeNursing == nil)
         #expect(store.toast?.message == "Nursing timer discarded")
@@ -358,7 +722,6 @@ struct BlythesLifeStoreTests {
         #expect(store.activeNursing?.leftAccumulatedSeconds == 120)
         #expect(store.activeNursing?.rightAccumulatedSeconds == 180)
 
-        // Finish saves event with both-side metadata
         let saved = store.finishNursing()
         #expect(saved != nil)
         #expect(store.activeNursing == nil)
@@ -418,17 +781,14 @@ struct BlythesLifeStoreTests {
         #expect(updatedInStore != nil)
         #expect(store.eventDetail(for: updatedInStore!) == "Pee L · Poop S · Rash")
 
-        // Undo edit restores Pee M
         store.undoLastToast()
         let restoredAfterEditUndo = store.todayEvents.first(where: { $0.id == original.id })!
         #expect(store.eventDetail(for: restoredAfterEditUndo) == "Pee M")
 
-        // Soft delete hides event from todayEvents but preserves tombstone in events array
         store.deleteEvent(restoredAfterEditUndo)
         #expect(store.todayEvents.first(where: { $0.id == original.id }) == nil)
         #expect(store.events.first(where: { $0.id == original.id })?.deletedAt != nil)
 
-        // Undo delete clears deletedAt
         store.undoLastToast()
         #expect(store.todayEvents.first(where: { $0.id == original.id }) != nil)
         #expect(store.events.first(where: { $0.id == original.id })?.deletedAt == nil)
@@ -447,12 +807,10 @@ struct BlythesLifeStoreTests {
         #expect(sheet.unresolvedAmbiguityCount == 1)
         #expect(!sheet.canConfirm)
 
-        // Attempting to confirm while ambiguity is unresolved must refuse and create 0 events
         let blocked = store.confirmScanReview(sheetId: sheet.id, drafts: sheet.drafts)
         #expect(blocked.isEmpty)
         #expect(store.pendingReviewSheet != nil)
 
-        // Resolve the overwritten diaper time to 11:30 AM and include Vitamin D suggestion
         var resolvedDrafts = sheet.drafts
         if let s5Idx = resolvedDrafts.firstIndex(where: { $0.id == "s5" }) {
             resolvedDrafts[s5Idx].resolvedOption = "11:30 AM"
@@ -480,7 +838,6 @@ struct BlythesLifeStoreTests {
         #expect(store.pendingReviewSheet == nil)
         #expect(store.toast?.message == "4 entries saved from Grandma's sheet")
 
-        // Verify resolved ambiguity timestamp became 11:30 AM
         let tz = store.profileTimeZone
         let resolvedDiaper = saved.first {
             if case .diaper(let d) = $0.metadata { return d.peeSize == .large }
@@ -489,7 +846,6 @@ struct BlythesLifeStoreTests {
         #expect(resolvedDiaper != nil)
         #expect(FormattingHelpers.formatClock(resolvedDiaper!.startedAt, timeZone: tz) == "11:30 AM")
 
-        // Undo confirmation restores pending sheet and removes all 4 entries
         store.undoLastToast()
         #expect(store.todayEvents.count == beforeToday)
         #expect(store.pendingReviewSheet?.id == sheet.id)
@@ -515,10 +871,10 @@ struct BlythesLifeStoreTests {
         #expect(today.nursingCount == 1)
         #expect(today.mealCount == 1)
         #expect(today.diaperCount == 2)
-        let hasLiveSpan = today.sleepSpans.contains { $0.isLive }
-        #expect(hasLiveSpan)
+        let liveSpans = today.sleepSpans.filter(\.isLive)
+        #expect(liveSpans.count == 1)
+        #expect(today.sleepSpans.count == 3) // Night sleep + Nap 1 + 1 live nap (no double-count)
 
-        // Prior days should each have full 24h sleep + 4 bottles + 3 meals + 5 diapers
         for priorDay in days.prefix(6) {
             #expect(priorDay.bottleCount == 4)
             #expect(priorDay.mealCount == 3)
@@ -544,9 +900,693 @@ struct BlythesLifeStoreTests {
     }
 }
 
-// MARK: - Huckleberry Import, Portability, Persistence & SSE Tests
+// MARK: - Live Backend Integration & Sync Tests
 
-@Suite("Portability, Importer, Persistence & SSE")
+@Suite("Live Backend E2E Flows")
+@MainActor
+struct LiveBackendIntegrationTests {
+    @Test("401 automatically rotates refresh token in tokenStore and retries operation once")
+    func automatic401RefreshAndRetry() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "expired-access-token",
+                refreshToken: "rt_old_123",
+                expiresAt: Date().addingTimeInterval(-60),
+                deviceId: "device-iphone-1"
+            )
+        )
+        let user = UserDTO(id: SampleSeedData.ownerUserId, displayName: "Brian", primaryEmail: "brian@icloud.com")
+        let household = HouseholdDTO(
+            id: SampleSeedData.householdId,
+            name: "Blythe's household",
+            inviteCode: "482913",
+            createdBy: user.id
+        )
+
+        mockAPI.state.withLock { state in
+            state.refreshHandler = { req in
+                #expect(req.refreshToken == "rt_old_123")
+                #expect(req.deviceId == "device-iphone-1")
+                return AuthSessionResponse(
+                    accessToken: "fresh-access-token",
+                    expiresIn: 900,
+                    refreshToken: "rt_rotated_456",
+                    user: user,
+                    households: [household]
+                )
+            }
+            state.rotateInviteHandler = { householdId, accessToken in
+                if accessToken == "expired-access-token" {
+                    throw BackendAPIError.unauthorized
+                }
+                #expect(accessToken == "fresh-access-token")
+                return HouseholdDTO(
+                    id: householdId,
+                    name: "Blythe's household",
+                    inviteCode: "998877",
+                    createdBy: user.id
+                )
+            }
+        }
+
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        #expect(store.isSignedInWithApple == true)
+
+        await store.rotateInviteCodeAsync()
+
+        #expect(store.household.inviteCode == "998877")
+        let savedTokens = tokenStore.load()
+        #expect(savedTokens?.accessToken == "fresh-access-token")
+        #expect(savedTokens?.refreshToken == "rt_rotated_456")
+        #expect(savedTokens?.deviceId == "device-iphone-1")
+        #expect(mockAPI.state.withLock { $0.refreshRequests.count } == 1)
+    }
+
+    @Test("401 during refresh cleanly signs out locally with session-expired status")
+    func failedRefreshSignsOutLocally() async {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "expired-access",
+                refreshToken: "rt_revoked",
+                deviceId: "device-iphone-2"
+            )
+        )
+
+        mockAPI.state.withLock { state in
+            state.refreshHandler = { _ in throw BackendAPIError.unauthorized }
+            state.syncPullHandler = { _, _, _ in throw BackendAPIError.unauthorized }
+        }
+
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        await store.pullFromServer()
+
+        #expect(store.isSignedInWithApple == false)
+        #expect(tokenStore.load() == nil)
+        #expect(store.syncStatus == .error("Session expired. Sign in again."))
+    }
+
+    @Test("completeAppleSignIn bootstraps new user with household + Blythe profile and clears demo seed")
+    func completeAppleSignInBrandNewUser() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-brand-new")
+        let newUserId = UUID()
+        let newHouseholdId = UUID()
+        let newProfileId = UUID()
+
+        mockAPI.state.withLock { state in
+            state.signInHandler = { req in
+                #expect(req.identityToken == "apple-jwt-token")
+                #expect(req.rawNonce == "raw-nonce-xyz")
+                #expect(req.authorizationCode == "auth-code-abc")
+                #expect(req.deviceId == "dev-brand-new")
+                #expect(req.platform == "ios")
+                return AuthSessionResponse(
+                    accessToken: "live-jwt-1",
+                    expiresIn: 900,
+                    refreshToken: "rt_live_1",
+                    user: UserDTO(id: newUserId, displayName: "Brian", primaryEmail: "brian@example.com"),
+                    households: []
+                )
+            }
+            state.createHouseholdHandler = { name, token in
+                #expect(name == "Blythe's household")
+                #expect(token == "live-jwt-1")
+                return HouseholdDTO(
+                    id: newHouseholdId,
+                    name: name,
+                    inviteCode: "774411",
+                    createdBy: newUserId
+                )
+            }
+            state.createProfileHandler = { req, token in
+                #expect(req.householdId == newHouseholdId)
+                #expect(req.displayName == "Blythe")
+                #expect(token == "live-jwt-1")
+                return ProfileDTO(
+                    id: newProfileId,
+                    householdId: newHouseholdId,
+                    displayName: req.displayName,
+                    defaultTimezone: req.defaultTimezone,
+                    scheduleConfig: req.scheduleConfig ?? ScheduleConfig()
+                )
+            }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(events: [], profiles: [], serverWatermark: Date(), hasMore: false)
+            }
+        }
+
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        #expect(!store.events.isEmpty) // Demo seed initially present
+        #expect(!store.scannedSheets.isEmpty)
+
+        try await store.completeAppleSignIn(
+            identityToken: "apple-jwt-token",
+            rawNonce: "raw-nonce-xyz",
+            authorizationCode: "auth-code-abc",
+            displayName: "Brian",
+            email: "brian@example.com"
+        )
+        defer { store.stopRealtimeSync() }
+
+        #expect(store.isSignedInWithApple == true)
+        #expect(store.isAuthenticating == false)
+        #expect(store.currentUserId == newUserId)
+        #expect(store.household.id == newHouseholdId)
+        #expect(store.profile.id == newProfileId)
+        #expect(store.events.isEmpty) // Demo seed cleared!
+        #expect(store.scannedSheets.isEmpty)
+        #expect(store.outbox.isEmpty)
+        #expect(store.toast?.message == "Signed in with Apple")
+        #expect(tokenStore.load()?.refreshToken == "rt_live_1")
+    }
+
+    @Test("completeAppleSignIn adopts existing household & profile and pulls remote events for returning user")
+    func completeAppleSignInReturningUser() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-returning")
+        let userId = UUID()
+        let householdId = UUID()
+        let profileId = UUID()
+        let existingHousehold = HouseholdDTO(
+            id: householdId,
+            name: "Phan Family",
+            inviteCode: "334455",
+            createdBy: userId
+        )
+        let existingProfile = ProfileDTO(
+            id: profileId,
+            householdId: householdId,
+            displayName: "Blythe",
+            birthDate: "2026-03-25",
+            defaultTimezone: "America/Los_Angeles"
+        )
+        let remoteEvent = EventDTO(
+            id: UUID(),
+            profileId: profileId,
+            eventType: .diaper,
+            startedAt: Date().addingTimeInterval(-600),
+            timezone: "America/Los_Angeles",
+            metadata: .diaper(DiaperMetadata(peeSize: .large)),
+            createdBy: userId,
+            updatedBy: userId
+        )
+
+        mockAPI.state.withLock { state in
+            state.signInHandler = { _ in
+                AuthSessionResponse(
+                    accessToken: "jwt-returning",
+                    expiresIn: 900,
+                    refreshToken: "rt-returning",
+                    user: UserDTO(id: userId, displayName: "Sarah", primaryEmail: "sarah@example.com"),
+                    households: [existingHousehold]
+                )
+            }
+            state.listProfilesHandler = { _ in [existingProfile] }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(
+                    events: [remoteEvent],
+                    profiles: [existingProfile],
+                    serverWatermark: Date(),
+                    hasMore: false
+                )
+            }
+        }
+
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        try await store.completeAppleSignIn(identityToken: "jwt", rawNonce: "nonce")
+        defer { store.stopRealtimeSync() }
+
+        #expect(store.household.id == householdId)
+        #expect(store.profile.id == profileId)
+        #expect(store.events.count == 1)
+        #expect(store.events.first?.id == remoteEvent.id)
+        let calls = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(!calls.contains("POST /v1/households"))
+        #expect(!calls.contains("POST /v1/profiles"))
+    }
+
+    @Test("joinHouseholdAsync strips spaces, adopts joined profile, pulls shared events; deleteAccountAsync wipes state")
+    func joinHouseholdRotateAndDeleteAccount() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "live-token",
+                refreshToken: "rt-live",
+                deviceId: "dev-spouse"
+            )
+        )
+        let joinedHouseholdId = UUID()
+        let joinedProfileId = UUID()
+        let sharedEvent = EventDTO(
+            id: UUID(),
+            profileId: joinedProfileId,
+            eventType: .feeding,
+            startedAt: makeDate(hour: 11, minute: 0),
+            timezone: "America/Los_Angeles",
+            metadata: .feeding(FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: 3.5)),
+            createdBy: SampleSeedData.ownerUserId,
+            updatedBy: SampleSeedData.ownerUserId
+        )
+
+        mockAPI.state.withLock { state in
+            state.joinHouseholdHandler = { code, _, _ in
+                #expect(code == "482913")
+                return HouseholdDTO(
+                    id: joinedHouseholdId,
+                    name: "Blythe's household",
+                    inviteCode: "482913",
+                    createdBy: SampleSeedData.ownerUserId
+                )
+            }
+            state.listProfilesHandler = { _ in
+                [
+                    ProfileDTO(
+                        id: joinedProfileId,
+                        householdId: joinedHouseholdId,
+                        displayName: "Blythe",
+                        defaultTimezone: "America/Los_Angeles"
+                    )
+                ]
+            }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(
+                    events: [sharedEvent],
+                    profiles: [],
+                    serverWatermark: makeDate(hour: 12, minute: 0),
+                    hasMore: false
+                )
+            }
+            state.rotateInviteHandler = { hid, _ in
+                HouseholdDTO(
+                    id: hid,
+                    name: "Blythe's household",
+                    inviteCode: "551122",
+                    createdBy: SampleSeedData.ownerUserId
+                )
+            }
+        }
+
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        try await store.joinHouseholdAsync(inviteCode: " 482 913 ", displayName: "Sarah")
+        defer { store.stopRealtimeSync() }
+
+        #expect(store.household.id == joinedHouseholdId)
+        #expect(store.profile.id == joinedProfileId)
+        #expect(store.events.count == 1)
+        #expect(store.events.first?.id == sharedEvent.id)
+        #expect(store.toast?.message == "Joined Blythe's household")
+
+        await store.rotateInviteCodeAsync()
+        #expect(store.household.inviteCode == "551122")
+        #expect(store.formattedInviteCode == "551 122")
+
+        let health = await store.checkBackendHealth()
+        #expect(health?.status == "ok")
+        #expect(health?.vlmConfigured == true)
+
+        try await store.deleteAccountAsync()
+        #expect(mockAPI.state.withLock { $0.deleteAccountCallCount } == 1)
+        #expect(store.isSignedInWithApple == false)
+        #expect(store.authEmail == nil)
+        #expect(store.displayName == nil)
+        #expect(store.events.isEmpty)
+        #expect(tokenStore.load() == nil)
+        #expect(store.toast?.message == "Account deleted")
+    }
+
+    @Test("Live open-ended nap timer syncs start, start-time edit, and wake-up across Device A and Device B")
+    func crossDeviceLiveNapSync() async {
+        // Shared in-memory backend event table simulating Postgres between Device A and Device B.
+        let serverEvents = OSAllocatedUnfairLock<[UUID: EventDTO]>(initialState: [:])
+
+        let sharedAPI = MockBackendAPI()
+        sharedAPI.state.withLock { state in
+            state.syncPushHandler = { req, _ in
+                serverEvents.withLock { table in
+                    for event in req.events {
+                        table[event.id] = event
+                    }
+                }
+                return SyncPushResponse(
+                    acceptedEventIds: req.events.map(\.id),
+                    acceptedProfileIds: (req.profiles ?? []).map(\.id),
+                    rejected: [],
+                    serverWatermark: makeDate(hour: 13, minute: 30)
+                )
+            }
+            state.syncPullHandler = { _, _, _ in
+                let snapshot = serverEvents.withLock { Array($0.values) }
+                return SyncPullResponse(
+                    events: snapshot,
+                    profiles: [],
+                    serverWatermark: makeDate(hour: 13, minute: 30),
+                    hasMore: false
+                )
+            }
+        }
+
+        let deviceA = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-a")
+        let deviceB = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-b")
+        #expect(deviceB.activeNapStart == nil)
+
+        // 1. Device A starts nap -> creates open-ended EventDTO and pushes to Postgres
+        let napStart = deviceA.now
+        _ = deviceA.toggleNap()
+        await deviceA.flushOutbox()
+
+        let openOnServer = serverEvents.withLock { $0.values.first(where: { $0.eventType == .sleep && $0.endedAt == nil }) }
+        #expect(openOnServer != nil)
+        #expect(openOnServer?.startedAt == napStart)
+
+        // 2. Device B pulls -> immediately enters live asleep state!
+        await deviceB.pullFromServer()
+        #expect(deviceB.activeNapStart == napStart)
+        #expect(deviceB.napCardState.mode == .asleep)
+        #expect(!deviceB.todayEvents.contains(where: { $0.id == openOnServer?.id }))
+
+        // 3. Device A edits active nap start time 10 minutes earlier and flushes
+        let adjustedStart = napStart.addingTimeInterval(-10 * 60)
+        deviceA.tick(now: napStart.addingTimeInterval(60))
+        deviceA.updateActiveNapStart(adjustedStart)
+        await deviceA.flushOutbox()
+
+        // Device B pulls -> reflects adjusted start time
+        await deviceB.pullFromServer()
+        #expect(deviceB.activeNapStart == adjustedStart)
+
+        // 4. Device A taps Wake up -> updates SAME event with endedAt != nil
+        let wakeTime = napStart.addingTimeInterval(45 * 60)
+        deviceA.tick(now: wakeTime)
+        let finishedNap = deviceA.toggleNap()
+        #expect(finishedNap?.id == openOnServer?.id)
+        #expect(finishedNap?.endedAt == wakeTime)
+        await deviceA.flushOutbox()
+
+        // 5. Device B pulls -> clears activeNapStart and shows completed nap in todayEvents!
+        deviceB.tick(now: wakeTime)
+        await deviceB.pullFromServer()
+        #expect(deviceB.activeNapStart == nil)
+        #expect(deviceB.napCardState.mode == .awake)
+        #expect(deviceB.todayEvents.contains(where: { $0.id == finishedNap?.id && $0.endedAt == wakeTime }))
+    }
+
+    @Test("Live paper-scan pipeline compresses, presigns, uploads to R2, extracts drafts + VIT D + ambiguity, and confirms without duplicate sync push")
+    func livePaperScanPipelineAndConfirm() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "scan-token",
+                refreshToken: "rt-scan",
+                deviceId: "dev-scan"
+            )
+        )
+        let scanId = UUID()
+        let bottleTime = makeDate(hour: 10, minute: 45)
+        let diaperTime = makeDate(hour: 11, minute: 20)
+
+        mockAPI.state.withLock { state in
+            state.presignHandler = { req, _ in
+                #expect(req.contentType == "image/jpeg")
+                #expect((req.fileSizeBytes ?? 0) > 0)
+                return PresignUploadResponse(
+                    scanId: scanId,
+                    storageKey: "scans/live/\(scanId.uuidString.lowercased()).jpg",
+                    uploadUrl: "https://r2.blythe.example/presigned-put",
+                    uploadHeaders: ["Content-Type": "image/jpeg", "x-amz-acl": "private"],
+                    expiresAt: Date().addingTimeInterval(300)
+                )
+            }
+            state.extractHandler = { req, _ in
+                #expect(req.scanId == scanId)
+                #expect(req.storageKey == "scans/live/\(scanId.uuidString.lowercased()).jpg")
+                let extraction = PaperScanExtraction(
+                    detectedDate: "2026-11-25",
+                    timezone: "America/Los_Angeles",
+                    sheetNotes: "Happy morning",
+                    events: [
+                        ExtractedEventDraft(
+                            eventType: .feeding,
+                            startedAt: bottleTime,
+                            metadata: .feeding(FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: 3.5)),
+                            confidence: .high,
+                            matchAction: .create,
+                            suggestedCompanion: CompanionSuggestion(
+                                eventType: .medicine,
+                                startedAt: bottleTime,
+                                notes: "Suggested from '+ VIT D' badge",
+                                metadata: .medicine(MedicineMetadata(name: "Vitamin D", category: .supplement)),
+                                reason: "Row carries + VIT D badge"
+                            )
+                        ),
+                        ExtractedEventDraft(
+                            eventType: .diaper,
+                            startedAt: diaperTime,
+                            metadata: .diaper(DiaperMetadata(peeSize: .large)),
+                            confidence: .medium,
+                            ambiguityReason: "Overwritten minute digit; could be 11:20 or 11:30",
+                            matchAction: .create
+                        ),
+                        ExtractedEventDraft(
+                            eventType: .sleep,
+                            startedAt: makeDate(hour: 9, minute: 15),
+                            endedAt: makeDate(hour: 10, minute: 32),
+                            metadata: .sleep(SleepMetadata(sleepType: .nap)),
+                            confidence: .high,
+                            matchAction: .skipDuplicate
+                        )
+                    ]
+                )
+                return PaperScanDTO(
+                    id: scanId,
+                    profileId: req.profileId,
+                    scanDate: "2026-11-25",
+                    timezone: req.timezone,
+                    storageKey: req.storageKey,
+                    modelId: "google/gemini-3-flash-preview",
+                    rawExtraction: extraction,
+                    sheetNotes: "Happy morning",
+                    status: .pendingReview,
+                    scannedBy: SampleSeedData.ownerUserId
+                )
+            }
+        }
+
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        let bigPNG = makeSyntheticPNG(width: 2600, height: 1800)
+
+        let sheet = try await store.processScannedPhotoAsync(bigPNG)
+        #expect(store.isProcessingScan == false)
+        #expect(sheet.id == scanId)
+        #expect(sheet.imageData != nil)
+        #expect(sheet.drafts.count == 4) // bottle + Vitamin D suggestion + ambiguous diaper + duplicate nap
+        #expect(sheet.unresolvedAmbiguityCount == 1)
+
+        // Verify R2 PUT received compressed JPEG with presigned headers
+        let uploads = mockAPI.state.withLock { $0.uploadedBytes }
+        #expect(uploads.count == 1)
+        #expect(uploads[0].url.absoluteString == "https://r2.blythe.example/presigned-put")
+        #expect(uploads[0].headers["x-amz-acl"] == "private")
+        #expect(uploads[0].data.count < bigPNG.count || uploads[0].data.prefix(2) == Data([0xFF, 0xD8]))
+
+        // Verify Vitamin D companion suggestion & ambiguity chips
+        let vitDDraft = sheet.drafts.first(where: { $0.isSuggestion })
+        #expect(vitDDraft?.title == "Vitamin D")
+        #expect(vitDDraft?.isIncluded == false)
+
+        let ambiguousDiaper = sheet.drafts.first(where: { $0.hasUnresolvedAmbiguity })
+        #expect(ambiguousDiaper?.ambiguityOptions == ["11:20 AM", "11:30 AM"])
+
+        // Resolve ambiguity to 11:30 AM, opt in to Vitamin D, and confirm live
+        var editedDrafts = sheet.drafts
+        for idx in editedDrafts.indices {
+            if editedDrafts[idx].hasUnresolvedAmbiguity {
+                editedDrafts[idx].resolvedOption = "11:30 AM"
+            }
+            if editedDrafts[idx].isSuggestion {
+                editedDrafts[idx].isIncluded = true
+            }
+        }
+
+        let savedEvents = await store.confirmScanReviewAsync(sheetId: scanId, drafts: editedDrafts)
+        #expect(savedEvents.count == 3) // bottle + Vitamin D + diaper (duplicate nap skipped)
+
+        let confirmedRequests = mockAPI.state.withLock { $0.confirmedScanRequests }
+        let pushedRequests = mockAPI.state.withLock { $0.pushedRequests }
+        #expect(confirmedRequests.count == 1)
+        #expect(confirmedRequests[0].scanId == scanId)
+        #expect(confirmedRequests[0].scanDate == "2026-11-25")
+        #expect(confirmedRequests[0].sheetNotes == "Happy morning")
+        #expect(confirmedRequests[0].events.count == 3)
+        #expect(pushedRequests.isEmpty) // Zero duplicate /v1/sync/push!
+    }
+}
+
+// MARK: - URLSessionBackendAPIClient Exact Route Verification
+
+@Suite("URLSessionBackendAPIClient Routes", .serialized)
+struct URLSessionBackendAPIClientRouteTests {
+    @Test("Every endpoint hits the exact live backend path and HTTP method")
+    func verifiesExactLiveBackendRoutes() async throws {
+        let householdId = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let profileId = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let scanId = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
+        let user = UserDTO(id: SampleSeedData.ownerUserId, displayName: "Brian", primaryEmail: "brian@icloud.com")
+        let household = HouseholdDTO(id: householdId, name: "Blythe's household", inviteCode: "123456", createdBy: user.id)
+        let profile = ProfileDTO(id: profileId, householdId: householdId, displayName: "Blythe")
+        let scan = PaperScanDTO(
+            id: scanId,
+            profileId: profileId,
+            scanDate: "2026-11-25",
+            timezone: "America/Los_Angeles",
+            storageKey: "scans/test.jpg",
+            scannedBy: user.id
+        )
+
+        let encoder = BlythesLifeJSONCoding.makeEncoder()
+
+        RouteCapturingURLProtocol.configure { request in
+            let path = request.url?.path ?? ""
+            let method = request.httpMethod ?? "GET"
+            switch (method, path) {
+            case ("GET", "/health"):
+                let payload = BackendHealthResponse(
+                    status: "ok",
+                    database: "postgres",
+                    storage: "r2",
+                    extractionModel: "google/gemini-3-flash-preview",
+                    vlmConfigured: true
+                )
+                return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("POST", "/v1/auth/apple"), ("POST", "/v1/auth/refresh"):
+                let payload = AuthSessionResponse(
+                    accessToken: "jwt",
+                    expiresIn: 900,
+                    refreshToken: "rt",
+                    user: user,
+                    households: [household]
+                )
+                return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("POST", "/v1/auth/logout"), ("DELETE", "/v1/account"):
+                return (204, Data(), [:])
+            case ("GET", "/v1/auth/me"):
+                let payload = AuthMeResponse(user: user, households: [household])
+                return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("GET", "/v1/households"):
+                return (200, try! encoder.encode([household]), ["Content-Type": "application/json"])
+            case ("POST", "/v1/households"),
+                 ("POST", "/v1/households/join"),
+                 ("POST", "/v1/households/\(householdId.uuidString.lowercased())/invite"):
+                return (200, try! encoder.encode(household), ["Content-Type": "application/json"])
+            case ("GET", "/v1/profiles"):
+                return (200, try! encoder.encode([profile]), ["Content-Type": "application/json"])
+            case ("POST", "/v1/profiles"),
+                 ("PATCH", "/v1/profiles/\(profileId.uuidString.lowercased())"):
+                return (200, try! encoder.encode(profile), ["Content-Type": "application/json"])
+            case ("POST", "/v1/sync/push"):
+                let payload = SyncPushResponse(acceptedEventIds: [], acceptedProfileIds: [], serverWatermark: Date())
+                return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("GET", "/v1/sync/pull"):
+                let payload = SyncPullResponse(events: [], profiles: [], serverWatermark: Date(), hasMore: false)
+                return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("POST", "/v1/scans/presign"):
+                let payload = PresignUploadResponse(
+                    scanId: scanId,
+                    storageKey: "scans/test.jpg",
+                    uploadUrl: "https://r2.example.com/object",
+                    uploadHeaders: ["Content-Type": "image/jpeg"],
+                    expiresAt: Date().addingTimeInterval(300)
+                )
+                return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("PUT", "/object"):
+                return (200, Data(), [:])
+            case ("POST", "/v1/scans/extract"),
+                 ("POST", "/v1/scans/\(scanId.uuidString.lowercased())/confirm"),
+                 ("GET", "/v1/scans/\(scanId.uuidString.lowercased())"):
+                return (200, try! encoder.encode(scan), ["Content-Type": "application/json"])
+            case ("GET", "/v1/profiles/\(profileId.uuidString.lowercased())/export/json"):
+                return (200, Data("{\"schema_version\":1}".utf8), ["Content-Type": "application/json"])
+            case ("GET", "/v1/profiles/\(profileId.uuidString.lowercased())/export/csv"):
+                return (200, Data("Date,Time\n".utf8), ["Content-Type": "text/csv"])
+            default:
+                return (404, Data("Not found: \(method) \(path)".utf8), [:])
+            }
+        }
+
+        let client = makeMockURLSessionClient()
+        let token = "bearer-abc"
+
+        let health = try await client.fetchHealth()
+        #expect(health.status == "ok")
+
+        _ = try await client.signInWithApple(
+            AppleAuthRequest(identityToken: "id", rawNonce: "n", deviceId: "d", deviceName: "iPhone", platform: "ios")
+        )
+        _ = try await client.refreshSession(RefreshTokenRequest(refreshToken: "rt", deviceId: "d"))
+        try await client.logout(LogoutRequest(refreshToken: "rt", deviceId: "d"), accessToken: token)
+        let me = try await client.fetchMe(accessToken: token)
+        #expect(me.user.id == user.id)
+        try await client.deleteAccount(accessToken: token)
+
+        _ = try await client.listHouseholds(accessToken: token)
+        _ = try await client.createHousehold(name: "Test", accessToken: token)
+        _ = try await client.joinHousehold(inviteCode: "123456", displayName: "Sarah", accessToken: token)
+        _ = try await client.rotateInviteCode(householdId: householdId, accessToken: token)
+
+        _ = try await client.listProfiles(accessToken: token)
+        _ = try await client.createProfile(CreateProfileRequest(householdId: householdId, displayName: "Blythe"), accessToken: token)
+        _ = try await client.updateProfile(profileId: profileId, request: UpdateProfileRequest(displayName: "Blythe"), accessToken: token)
+
+        _ = try await client.syncPush(SyncPushRequest(events: []), accessToken: token)
+        _ = try await client.syncPull(since: makeDate(hour: 10, minute: 0), limit: 250, accessToken: token)
+
+        _ = try await client.presignScan(PresignUploadRequest(profileId: profileId, contentType: "image/jpeg", fileSizeBytes: 123), accessToken: token)
+        try await client.uploadScanBytes(to: URL(string: "https://r2.example.com/object")!, headers: ["Content-Type": "image/jpeg"], data: Data([0xFF, 0xD8]))
+        _ = try await client.extractScan(ExtractPaperScanRequest(scanId: scanId, profileId: profileId, storageKey: "scans/test.jpg", timezone: "America/Los_Angeles"), accessToken: token)
+        _ = try await client.confirmScan(ConfirmPaperScanRequest(scanId: scanId, profileId: profileId, scanDate: "2026-11-25", events: []), accessToken: token)
+        _ = try await client.getScan(scanId: scanId, accessToken: token)
+
+        let jsonExport = try await client.exportJSON(profileId: profileId, accessToken: token)
+        #expect(!jsonExport.isEmpty)
+        let csvExport = try await client.exportCSV(profileId: profileId, accessToken: token)
+        #expect(!csvExport.isEmpty)
+
+        let recorded = RouteCapturingURLProtocol.recordedRequests()
+        let methodPaths = recorded.map { "\($0.method) \($0.path)" }
+
+        let expected: [String] = [
+            "GET /health",
+            "POST /v1/auth/apple",
+            "POST /v1/auth/refresh",
+            "POST /v1/auth/logout",
+            "GET /v1/auth/me",
+            "DELETE /v1/account",
+            "GET /v1/households",
+            "POST /v1/households",
+            "POST /v1/households/join",
+            "POST /v1/households/\(householdId.uuidString.lowercased())/invite",
+            "GET /v1/profiles",
+            "POST /v1/profiles",
+            "PATCH /v1/profiles/\(profileId.uuidString.lowercased())",
+            "POST /v1/sync/push",
+            "GET /v1/sync/pull",
+            "POST /v1/scans/presign",
+            "PUT /object",
+            "POST /v1/scans/extract",
+            "POST /v1/scans/\(scanId.uuidString.lowercased())/confirm",
+            "GET /v1/scans/\(scanId.uuidString.lowercased())",
+            "GET /v1/profiles/\(profileId.uuidString.lowercased())/export/json",
+            "GET /v1/profiles/\(profileId.uuidString.lowercased())/export/csv"
+        ]
+        #expect(methodPaths == expected)
+        #expect(recorded.first(where: { $0.path == "/v1/account" })?.authorization == "Bearer bearer-abc")
+    }
+}
+
+// MARK: - Auth Crypto, Image Compression, Portability, Importer, Persistence & SSE Tests
+
+@Suite("Portability, Importer, Persistence, Crypto, Image & SSE")
 struct PortabilityAndInfrastructureTests {
     private let sampleHuckleberryCSV = """
     "Type","Start","End","Duration","Start Condition","Start Location","End Condition","Notes"
@@ -558,6 +1598,48 @@ struct PortabilityAndInfrastructureTests {
     "Solids","2026-11-20 12:00","","","Avocado, pear","","Most","Loved it"
     "Meds","2026-11-20 10:45","","","Vitamin D","","1 drops",""
     """
+
+    @Test("AppleNonceGenerator generates URL-safe random nonces and deterministic lowercase SHA-256 hex")
+    func appleNonceGenerator() {
+        let nonceA = AppleNonceGenerator.randomNonceString(length: 32)
+        let nonceB = AppleNonceGenerator.randomNonceString(length: 32)
+        let nonceLong = AppleNonceGenerator.randomNonceString(length: 64)
+
+        #expect(nonceA.count == 32)
+        #expect(nonceB.count == 32)
+        #expect(nonceLong.count == 64)
+        #expect(nonceA != nonceB)
+
+        let allowed = CharacterSet(charactersIn: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_")
+        #expect(nonceA.unicodeScalars.allSatisfy { allowed.contains($0) })
+
+        // Standard SHA-256 test vector matching backend TokenCrypto.sha256Hex
+        let digest = AppleNonceGenerator.sha256Hex("hello")
+        #expect(digest == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        #expect(digest.count == 64)
+        #expect(digest == AppleNonceGenerator.sha256Hex("hello"))
+    }
+
+    @Test("ImageCompressor downscales oversized images to <=2200px JPEG and preserves PDF bytes unchanged")
+    func imageCompressorDownscaleAndPDFPassthrough() {
+        let largePNG = makeSyntheticPNG(width: 3000, height: 1500)
+        let result = ImageCompressor.compressForScanUpload(largePNG, maxDimension: 2200, quality: 0.82)
+
+        #expect(result.contentType == "image/jpeg")
+        #expect(result.data.prefix(2) == Data([0xFF, 0xD8]))
+
+        let source = CGImageSourceCreateWithData(result.data as CFData, nil)!
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let outWidth = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let outHeight = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        #expect(max(outWidth, outHeight) == 2200)
+        #expect(outHeight == 1100)
+
+        let pdfBytes = Data("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF".utf8)
+        let pdfResult = ImageCompressor.compressForScanUpload(pdfBytes)
+        #expect(pdfResult.contentType == "application/pdf")
+        #expect(pdfResult.data == pdfBytes)
+    }
 
     @Test("Huckleberry CSV parses all event types with deterministic SHA-256 externalId and idempotent re-import")
     @MainActor
@@ -574,14 +1656,12 @@ struct PortabilityAndInfrastructureTests {
         for event in parsed {
             #expect(event.source == .importHuckleberry)
             #expect(event.externalId?.hasPrefix("hb:") == true)
-            #expect(event.externalId?.count == 19) // "hb:" + 16 hex chars
+            #expect(event.externalId?.count == 19)
         }
 
-        // First import adds all 7 events
         let firstAdded = store.importHuckleberryCSV(sampleHuckleberryCSV)
         #expect(firstAdded == 7)
 
-        // Second import of identical CSV adds 0 duplicates!
         let secondAdded = store.importHuckleberryCSV(sampleHuckleberryCSV)
         #expect(secondAdded == 0)
     }

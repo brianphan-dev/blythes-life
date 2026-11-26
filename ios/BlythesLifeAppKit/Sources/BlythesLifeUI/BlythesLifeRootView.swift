@@ -34,6 +34,8 @@ public enum BlythesLifeTab: String, CaseIterable, Identifiable, Sendable, Hashab
 /// Root universal SwiftUI entry point for Blythe's Life across iPhone, iPhone Duo (Folded, Unfolded, Tabletop), and iPad.
 @MainActor
 public struct BlythesLifeRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var store: BlythesLifeStore
     @State private var selectedTab: BlythesLifeTab = .today
     @State private var activeSheet: LogSheetRequest?
@@ -81,10 +83,18 @@ public struct BlythesLifeRootView: View {
         #endif
         .task {
             store.startClock()
+            await store.resumeLiveSession()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
             store.stopClock()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                Task { @MainActor in
+                    await store.resumeLiveSession()
+                }
+            }
         }
         .onDisappear {
             store.stopClock()
@@ -177,8 +187,16 @@ private struct BlythesLifeRootShell: View {
                 ScanReviewView(
                     sheet: sheet,
                     store: store,
-                    onCancel: { reviewingSheet = nil },
-                    onComplete: { reviewingSheet = nil }
+                    onCancel: {
+                        withAnimation(BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion)) {
+                            reviewingSheet = nil
+                        }
+                    },
+                    onComplete: {
+                        withAnimation(BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion)) {
+                            reviewingSheet = nil
+                        }
+                    }
                 )
                 .transition(.opacity)
                 .zIndex(20)
@@ -447,15 +465,15 @@ private struct BlythesLifeRootShell: View {
     private var syncStatusTitle: String {
         switch store.syncStatus {
         case .localOnly:
-            "On this device"
+            "Local preview"
         case .synced:
-            "On every device"
+            "Updated on every device"
         case .syncing:
-            "Updating"
+            "Updating…"
         case .offline(let pendingCount):
-            "\(pendingCount) waiting"
+            "Offline · \(pendingCount) waiting"
         case .error:
-            "Offline"
+            "Needs a look"
         }
     }
 

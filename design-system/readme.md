@@ -69,7 +69,8 @@ The PRD prescribes some UI. These are the places this system took a different ro
 - **Event glyphs** always sit in a tinted rounded square (`EventIcon`): moon (sleep), milk (bottle), baby (nursing), beaker (pump), droplets (diaper), utensils (meal), bath (bath), pill (meds and care), notebook-pen (note).
 - **UI glyphs** are bare, in the current text colour: sun, calendar-range, scan-text, settings, check, x, chevron-right, triangle-alert, clock, image.
 - **No emoji. No unicode characters as icons.** No custom SVG or PNG icons exist.
-- **No logo exists.** The name "Blythe's Life" is set in Newsreader wherever a mark would go (see the Wordmark card). Do not draw one.
+- **App icon:** the wordmark's B on a ruled line, ink on honey. Xcode-ready files are in `assets/AppIcon.appiconset/` (light, dark, tinted; 1024 × 1024). See `assets/app-icon/README.md`.
+- **No separate logo lockup exists.** In running text and headers the name "Blythe's Life" is set in Newsreader (see the Wordmark card). Do not draw a different mark.
 
 ## Components
 
@@ -89,6 +90,8 @@ No source defined a component inventory, so this set was authored from the PRD's
 - `components/` — `components.css` plus `core/`, `forms/`, `navigation/`, `tracking/`. Each folder has a `*.card.html` preview.
 - `ui_kits/ios/` — interactive iPhone click-through: Today, nine log sheets, Rhythm, Sheets, scan review, Settings, day and night. See its `README.md`.
 - `guidelines/` — foundation specimen cards (colours, type, spacing, brand).
+- `assets/AppIcon.appiconset/` — the app icon for Xcode: light, dark and tinted PNGs plus `Contents.json`. `assets/app-icon/` holds the transparent foreground layer and usage notes.
+- `brand/` — `App Icon Options.html` (the five directions explored; 1a was chosen) and `App Icon Export.html` (regenerates the PNGs).
 - `thumbnail.html` — project tile.
 - `SKILL.md` — agent skill entry point.
 - `github.md` — source repo association and sync record.

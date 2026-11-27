@@ -148,6 +148,10 @@ public enum DataPortabilityService: Sendable {
                 let minutes = endedAt.timeIntervalSince(event.startedAt) / 60.0
                 return FormattingHelpers.formatDuration(minutes: minutes)
             }
+            let maxSec = max(meta.leftDurationSeconds ?? 0, meta.rightDurationSeconds ?? 0)
+            if maxSec > 0 {
+                return FormattingHelpers.formatDuration(minutes: max(1.0, Double(maxSec) / 60.0))
+            }
             return ""
         default:
             if let endedAt = event.endedAt, endedAt > event.startedAt {

@@ -1736,6 +1736,56 @@ public final class BlythesLifeStore {
     @discardableResult
     public func logManualNursing(
         startedAt: Date,
+        leftMinutes: Double,
+        rightMinutes: Double,
+        lastSide: BreastSide? = nil,
+        notes: String? = nil
+    ) -> EventDTO {
+        let clampedLeft = max(0, leftMinutes)
+        let clampedRight = max(0, rightMinutes)
+        let total = clampedLeft + clampedRight
+        let side: BreastSide = {
+            if clampedLeft > 0 && clampedRight > 0 { return .both }
+            if clampedLeft > 0 { return .left }
+            if clampedRight > 0 { return .right }
+            return .left
+        }()
+        let resolvedLastSide: BreastSide? = {
+            if side == .both {
+                return (lastSide == .left || lastSide == .right) ? lastSide : nil
+            }
+            return side
+        }()
+        let leftSeconds = clampedLeft > 0 ? Int((clampedLeft * 60.0).rounded()) : nil
+        let rightSeconds = clampedRight > 0 ? Int((clampedRight * 60.0).rounded()) : nil
+        let endedAt = startedAt.addingTimeInterval(total * 60.0)
+        let event = makeEvent(
+            type: .feeding,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            notes: trimmedNonEmpty(notes),
+            metadata: .feeding(
+                FeedingMetadata(
+                    method: .breast,
+                    substance: .breastMilk,
+                    amountMl: nil,
+                    displayUnit: preferredUnit,
+                    side: side,
+                    durationMinutes: total,
+                    leftDurationSeconds: leftSeconds,
+                    rightDurationSeconds: rightSeconds,
+                    lastSide: resolvedLastSide
+                )
+            )
+        )
+        let minText = FormattingHelpers.formatNumber(total, maxFractionDigits: 1)
+        commitNewEvents([event], toastMessage: "Nursing logged · \(minText)m")
+        return event
+    }
+
+    @discardableResult
+    public func logManualNursing(
+        startedAt: Date,
         minutes: Double,
         side: BreastSide,
         lastSide: BreastSide? = nil,
@@ -1749,6 +1799,9 @@ public final class BlythesLifeStore {
             }
             return side
         }()
+        let sideSeconds = clampedMinutes > 0 ? Int((clampedMinutes * 60.0).rounded()) : nil
+        let leftSeconds = (side == .left) ? sideSeconds : nil
+        let rightSeconds = (side == .right) ? sideSeconds : nil
         let event = makeEvent(
             type: .feeding,
             startedAt: startedAt,
@@ -1762,6 +1815,8 @@ public final class BlythesLifeStore {
                     displayUnit: preferredUnit,
                     side: side,
                     durationMinutes: clampedMinutes,
+                    leftDurationSeconds: leftSeconds,
+                    rightDurationSeconds: rightSeconds,
                     lastSide: resolvedLastSide
                 )
             )
@@ -1773,48 +1828,128 @@ public final class BlythesLifeStore {
 
     // MARK: - Pump Timer Actions
 
-    public func startOrTogglePumpTimer(side: BreastSide = .both) {
+    public func tapPumpSide(_ side: BreastSide) {
+        let targetIsRight = (side == .right)
         guard let session = activePump else {
             activePump = ActivePumpSession(
                 startedAt: now,
-                accumulatedSeconds: 0,
-                isRunning: true,
-                activeSegmentStartedAt: now,
-                side: side
+                leftAccumulatedSeconds: 0,
+                rightAccumulatedSeconds: 0,
+                leftSegmentStartedAt: targetIsRight ? nil : now,
+                rightSegmentStartedAt: targetIsRight ? now : nil,
+                sessionAccumulatedSeconds: 0,
+                sessionSegmentStartedAt: now
+            )
+            persistState()
+            return
+        }
+
+        let wasRunning = session.isRunning
+        let elapsed = session.elapsedSeconds(asOf: now)
+
+        var newLeftAccum = session.leftAccumulatedSeconds
+        var newRightAccum = session.rightAccumulatedSeconds
+        var newLeftSeg = session.leftSegmentStartedAt
+        var newRightSeg = session.rightSegmentStartedAt
+
+        if targetIsRight {
+            if session.isRightRunning {
+                newRightAccum = elapsed.right
+                newRightSeg = nil
+            } else {
+                newRightSeg = now
+            }
+        } else {
+            if session.isLeftRunning {
+                newLeftAccum = elapsed.left
+                newLeftSeg = nil
+            } else {
+                newLeftSeg = now
+            }
+        }
+
+        let nowRunning = (newLeftSeg != nil) || (newRightSeg != nil)
+        let newSessionAccum: TimeInterval
+        let newSessionSeg: Date?
+
+        if !wasRunning && nowRunning {
+            newSessionAccum = session.sessionAccumulatedSeconds
+            newSessionSeg = now
+        } else if wasRunning && !nowRunning {
+            let delta = max(0, now.timeIntervalSince(session.sessionSegmentStartedAt ?? session.startedAt))
+            newSessionAccum = session.sessionAccumulatedSeconds + delta
+            newSessionSeg = nil
+        } else {
+            newSessionAccum = session.sessionAccumulatedSeconds
+            newSessionSeg = session.sessionSegmentStartedAt
+        }
+
+        activePump = ActivePumpSession(
+            startedAt: session.startedAt,
+            leftAccumulatedSeconds: newLeftAccum,
+            rightAccumulatedSeconds: newRightAccum,
+            leftSegmentStartedAt: newLeftSeg,
+            rightSegmentStartedAt: newRightSeg,
+            sessionAccumulatedSeconds: newSessionAccum,
+            sessionSegmentStartedAt: newSessionSeg
+        )
+        persistState()
+    }
+
+    public func togglePumpBoth() {
+        guard let session = activePump else {
+            activePump = ActivePumpSession(
+                startedAt: now,
+                leftAccumulatedSeconds: 0,
+                rightAccumulatedSeconds: 0,
+                leftSegmentStartedAt: now,
+                rightSegmentStartedAt: now,
+                sessionAccumulatedSeconds: 0,
+                sessionSegmentStartedAt: now
             )
             persistState()
             return
         }
 
         if session.isRunning {
+            let elapsed = session.elapsedSeconds(asOf: now)
+            let sessionDelta = max(0, now.timeIntervalSince(session.sessionSegmentStartedAt ?? session.startedAt))
             activePump = ActivePumpSession(
                 startedAt: session.startedAt,
-                accumulatedSeconds: session.elapsedSeconds(asOf: now),
-                isRunning: false,
-                activeSegmentStartedAt: nil,
-                side: session.side
+                leftAccumulatedSeconds: elapsed.left,
+                rightAccumulatedSeconds: elapsed.right,
+                leftSegmentStartedAt: nil,
+                rightSegmentStartedAt: nil,
+                sessionAccumulatedSeconds: session.sessionAccumulatedSeconds + sessionDelta,
+                sessionSegmentStartedAt: nil
             )
         } else {
             activePump = ActivePumpSession(
                 startedAt: session.startedAt,
-                accumulatedSeconds: session.accumulatedSeconds,
-                isRunning: true,
-                activeSegmentStartedAt: now,
-                side: session.side
+                leftAccumulatedSeconds: session.leftAccumulatedSeconds,
+                rightAccumulatedSeconds: session.rightAccumulatedSeconds,
+                leftSegmentStartedAt: now,
+                rightSegmentStartedAt: now,
+                sessionAccumulatedSeconds: session.sessionAccumulatedSeconds,
+                sessionSegmentStartedAt: now
             )
         }
         persistState()
     }
 
-    public func setActivePumpSide(_ side: BreastSide) {
-        guard activePump != nil else { return }
-        activePump?.side = side
-        persistState()
+    public func startOrTogglePumpTimer(side: BreastSide = .both) {
+        if side == .both {
+            togglePumpBoth()
+        } else {
+            tapPumpSide(side)
+        }
     }
 
     @discardableResult
     public func finishPumpTimer(
         amount: Double? = nil,
+        leftAmount: Double? = nil,
+        rightAmount: Double? = nil,
         unit: VolumeUnit? = nil,
         side: BreastSide? = nil,
         notes: String? = nil
@@ -1823,18 +1958,58 @@ public final class BlythesLifeStore {
         let elapsed = session.elapsedSeconds(asOf: now)
         let pausedBackup = ActivePumpSession(
             startedAt: session.startedAt,
-            accumulatedSeconds: elapsed,
-            isRunning: false,
-            activeSegmentStartedAt: nil,
-            side: session.side
+            leftAccumulatedSeconds: elapsed.left,
+            rightAccumulatedSeconds: elapsed.right,
+            leftSegmentStartedAt: nil,
+            rightSegmentStartedAt: nil,
+            sessionAccumulatedSeconds: elapsed.session,
+            sessionSegmentStartedAt: nil
         )
-        let minutes = max(1, Int((elapsed / 60.0).rounded()))
+        let sessionMinutes = max(1, Int((elapsed.session / 60.0).rounded()))
+        let leftSec = elapsed.left > 0 ? max(1, Int(elapsed.left.rounded())) : nil
+        let rightSec = elapsed.right > 0 ? max(1, Int(elapsed.right.rounded())) : nil
         let effectiveUnit = unit ?? preferredUnit
-        let effectiveSide = side ?? session.side
-        let positiveAmount: Double? = (amount ?? 0) > 0 ? amount : nil
-        let amountMl: Double? = positiveAmount.map {
-            effectiveUnit == .oz ? UnitConversion.ozToMl($0) : $0
+        let toMl: (Double) -> Double = { value in
+            effectiveUnit == .oz ? UnitConversion.ozToMl(value) : value
         }
+
+        let positiveLeftAmount = (leftAmount ?? 0) > 0 ? leftAmount! : 0
+        let positiveRightAmount = (rightAmount ?? 0) > 0 ? rightAmount! : 0
+        let positiveCombinedAmount = (amount ?? 0) > 0 ? amount! : 0
+
+        let leftMl: Double?
+        let rightMl: Double?
+        let totalMl: Double?
+        let displayTotal: Double?
+
+        if positiveLeftAmount > 0 || positiveRightAmount > 0 {
+            leftMl = positiveLeftAmount > 0 ? toMl(positiveLeftAmount) : nil
+            rightMl = positiveRightAmount > 0 ? toMl(positiveRightAmount) : nil
+            totalMl = (leftMl ?? 0) + (rightMl ?? 0)
+            displayTotal = positiveLeftAmount + positiveRightAmount
+        } else if positiveCombinedAmount > 0 {
+            leftMl = nil
+            rightMl = nil
+            totalMl = toMl(positiveCombinedAmount)
+            displayTotal = positiveCombinedAmount
+        } else {
+            leftMl = nil
+            rightMl = nil
+            totalMl = nil
+            displayTotal = nil
+        }
+
+        let effectiveSide: BreastSide = {
+            if let explicit = side {
+                return explicit
+            }
+            let hasLeft = (leftSec ?? 0) > 0 || (leftMl ?? 0) > 0 || session.isLeftRunning
+            let hasRight = (rightSec ?? 0) > 0 || (rightMl ?? 0) > 0 || session.isRightRunning
+            if hasLeft && hasRight { return .both }
+            if hasLeft { return .left }
+            if hasRight { return .right }
+            return .both
+        }()
 
         let event = makeEvent(
             type: .pump,
@@ -1843,10 +2018,14 @@ public final class BlythesLifeStore {
             notes: trimmedNonEmpty(notes),
             metadata: .pump(
                 PumpMetadata(
-                    amountMl: amountMl,
+                    amountMl: totalMl,
                     displayUnit: effectiveUnit,
                     side: effectiveSide,
-                    durationMinutes: Double(minutes)
+                    durationMinutes: Double(sessionMinutes),
+                    leftAmountMl: leftMl,
+                    rightAmountMl: rightMl,
+                    leftDurationSeconds: leftSec,
+                    rightDurationSeconds: rightSec
                 )
             )
         )
@@ -1854,11 +2033,11 @@ public final class BlythesLifeStore {
         activePump = nil
         appendEvents([event])
         let toastMessage: String
-        if let positiveAmount {
-            let amountLabel = FormattingHelpers.formatAmount(positiveAmount, unit: effectiveUnit)
-            toastMessage = "Pump logged · \(amountLabel) · \(minutes)m"
+        if let displayTotal {
+            let amountLabel = FormattingHelpers.formatAmount(displayTotal, unit: effectiveUnit)
+            toastMessage = "Pump logged · \(amountLabel) · \(sessionMinutes)m"
         } else {
-            toastMessage = "Pump logged · \(minutes)m"
+            toastMessage = "Pump logged · \(sessionMinutes)m"
         }
         showToast(toastMessage) { [weak self] in
             guard let self else { return }
@@ -1874,10 +2053,12 @@ public final class BlythesLifeStore {
         let elapsed = session.elapsedSeconds(asOf: now)
         let pausedBackup = ActivePumpSession(
             startedAt: session.startedAt,
-            accumulatedSeconds: elapsed,
-            isRunning: false,
-            activeSegmentStartedAt: nil,
-            side: session.side
+            leftAccumulatedSeconds: elapsed.left,
+            rightAccumulatedSeconds: elapsed.right,
+            leftSegmentStartedAt: nil,
+            rightSegmentStartedAt: nil,
+            sessionAccumulatedSeconds: elapsed.session,
+            sessionSegmentStartedAt: nil
         )
         activePump = nil
         persistState()
@@ -1939,21 +2120,79 @@ public final class BlythesLifeStore {
     @discardableResult
     public func logPump(
         startedAt: Date,
-        amount: Double,
+        amount: Double = 0,
         unit: VolumeUnit,
-        side: BreastSide,
+        side: BreastSide? = nil,
         durationMinutes: Double? = nil,
+        leftAmount: Double? = nil,
+        rightAmount: Double? = nil,
+        leftDurationMinutes: Double? = nil,
+        rightDurationMinutes: Double? = nil,
         notes: String? = nil
     ) -> EventDTO {
-        let effectiveDuration: Double? = (durationMinutes ?? 0) > 0 ? durationMinutes : nil
-        let amountMl: Double?
-        if amount > 0 {
-            amountMl = unit == .oz ? UnitConversion.ozToMl(amount) : amount
-        } else if effectiveDuration != nil {
-            amountMl = nil
-        } else {
-            amountMl = 0
+        let toMl: (Double) -> Double = { value in
+            unit == .oz ? UnitConversion.ozToMl(value) : value
         }
+
+        let positiveLeftAmount = (leftAmount ?? 0) > 0 ? leftAmount! : 0
+        let positiveRightAmount = (rightAmount ?? 0) > 0 ? rightAmount! : 0
+
+        let leftMl: Double?
+        let rightMl: Double?
+        let totalMl: Double?
+        let displayTotal: Double?
+
+        if positiveLeftAmount > 0 || positiveRightAmount > 0 {
+            leftMl = positiveLeftAmount > 0 ? toMl(positiveLeftAmount) : nil
+            rightMl = positiveRightAmount > 0 ? toMl(positiveRightAmount) : nil
+            totalMl = (leftMl ?? 0) + (rightMl ?? 0)
+            displayTotal = positiveLeftAmount + positiveRightAmount
+        } else if amount > 0 {
+            leftMl = nil
+            rightMl = nil
+            totalMl = toMl(amount)
+            displayTotal = amount
+        } else {
+            leftMl = nil
+            rightMl = nil
+            totalMl = nil
+            displayTotal = nil
+        }
+
+        let leftDur: Double? = (leftDurationMinutes ?? 0) > 0 ? leftDurationMinutes : nil
+        let rightDur: Double? = (rightDurationMinutes ?? 0) > 0 ? rightDurationMinutes : nil
+        let leftSec: Int? = leftDur.map { max(1, Int(($0 * 60.0).rounded())) }
+        let rightSec: Int? = rightDur.map { max(1, Int(($0 * 60.0).rounded())) }
+
+        let effectiveDuration: Double? = {
+            if let explicit = durationMinutes, explicit > 0 {
+                return explicit
+            }
+            if leftDur != nil || rightDur != nil {
+                return max(leftDur ?? 0, rightDur ?? 0)
+            }
+            return nil
+        }()
+
+        let resolvedAmountMl: Double? = {
+            if let totalMl {
+                return totalMl
+            }
+            return effectiveDuration == nil ? 0 : nil
+        }()
+
+        let effectiveSide: BreastSide = {
+            if let explicit = side {
+                return explicit
+            }
+            let hasLeft = (leftMl ?? 0) > 0 || (leftSec ?? 0) > 0
+            let hasRight = (rightMl ?? 0) > 0 || (rightSec ?? 0) > 0
+            if hasLeft && hasRight { return .both }
+            if hasLeft { return .left }
+            if hasRight { return .right }
+            return .both
+        }()
+
         let endedAt = effectiveDuration.map { startedAt.addingTimeInterval($0 * 60.0) }
         let event = makeEvent(
             type: .pump,
@@ -1962,21 +2201,25 @@ public final class BlythesLifeStore {
             notes: trimmedNonEmpty(notes),
             metadata: .pump(
                 PumpMetadata(
-                    amountMl: amountMl,
+                    amountMl: resolvedAmountMl,
                     displayUnit: unit,
-                    side: side,
-                    durationMinutes: effectiveDuration
+                    side: effectiveSide,
+                    durationMinutes: effectiveDuration,
+                    leftAmountMl: leftMl,
+                    rightAmountMl: rightMl,
+                    leftDurationSeconds: leftSec,
+                    rightDurationSeconds: rightSec
                 )
             )
         )
         let toastMessage: String
-        if amount > 0, let mins = effectiveDuration {
-            let amountLabel = FormattingHelpers.formatAmount(amount, unit: unit)
+        if let displayTotal, let mins = effectiveDuration {
+            let amountLabel = FormattingHelpers.formatAmount(displayTotal, unit: unit)
             toastMessage = "Pump logged · \(amountLabel) · \(max(1, Int(mins.rounded())))m"
         } else if let mins = effectiveDuration {
             toastMessage = "Pump logged · \(max(1, Int(mins.rounded())))m"
         } else {
-            let amountLabel = FormattingHelpers.formatAmount(amount, unit: unit)
+            let amountLabel = FormattingHelpers.formatAmount(displayTotal ?? 0, unit: unit)
             toastMessage = "Pump logged · \(amountLabel)"
         }
         commitNewEvents([event], toastMessage: toastMessage)

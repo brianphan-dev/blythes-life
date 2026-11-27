@@ -29,6 +29,22 @@ public struct LogSheetView: View {
         case timer = "Timer"
     }
 
+    private enum PumpVolumeMode: String, CaseIterable, Hashable {
+        case bySide = "By side"
+        case combined = "Combined"
+    }
+
+    private struct ResolvedPumpInput {
+        var combinedAmount: Double?
+        var leftAmount: Double?
+        var rightAmount: Double?
+        var totalDisplayAmount: Double
+        var sessionDurationMinutes: Double?
+        var leftDurationMinutes: Double?
+        var rightDurationMinutes: Double?
+        var side: BreastSide
+    }
+
     private enum DiaperSelection: String, CaseIterable, Hashable {
         case none = "None"
         case small = "S"
@@ -93,6 +109,8 @@ public struct LogSheetView: View {
 
     private static let bottleOzPresets = ["2", "2.5", "3", "3.25", "4", "5"]
     private static let bottleMlPresets = ["60", "75", "90", "100", "120", "150"]
+    private static let pumpSideOzPresets = ["1", "1.5", "2", "2.5", "3", "4"]
+    private static let pumpSideMlPresets = ["30", "45", "60", "75", "90", "120"]
     private static let pumpOzPresets = ["2", "3", "4", "5", "6", "8"]
     private static let pumpMlPresets = ["60", "90", "120", "150", "180", "240"]
     private static let pumpMinutePresets = ["10", "15", "20", "25", "30"]
@@ -126,15 +144,24 @@ public struct LogSheetView: View {
     @State private var volumeUnit: VolumeUnit
     @State private var substance: FeedingSubstance = .formula
     @State private var includeVitaminD: Bool = false
-    @State private var pumpSide: BreastSide = .both
     @State private var pumpMode: PumpInputMode
+    @State private var pumpVolumeMode: PumpVolumeMode
+    @State private var pumpLeftAmountText: String
+    @State private var pumpRightAmountText: String
+    @State private var focusedPumpVolumeSide: BreastSide
+    @State private var splitPumpTimes: Bool
     @State private var pumpDurationText: String
+    @State private var pumpLeftDurationText: String
+    @State private var pumpRightDurationText: String
+    @State private var focusedPumpDurationSide: BreastSide
 
     // Nursing state
     @State private var nursingMode: NursingInputMode = .timer
-    @State private var nursingMinutesText: String = "10"
-    @State private var nursingSide: BreastSide = .left
+    @State private var nursingLeftMinutesText: String
+    @State private var nursingRightMinutesText: String
+    @State private var focusedNursingSide: BreastSide
     @State private var nursingLastSide: BreastSide
+    @State private var userSelectedNursingLastSide: Bool
 
     // Diaper state
     @State private var peeSelection: DiaperSelection = .medium
@@ -192,26 +219,33 @@ public struct LogSheetView: View {
                 initSleepType = store.classifySleep(start: initSleepStart, end: initSleepEnd)
             }
         }
-        var initAmount = request.kind == .pump ? (isMl ? "120" : "4") : (isMl ? "95" : "3.25")
+        var initAmount = request.kind == .pump ? "" : (isMl ? "95" : "3.25")
         var initUnit = preferredUnit
         var initSubstance: FeedingSubstance = .formula
-        var initPumpSide: BreastSide = .both
         let initPumpMode: PumpInputMode = (store.activePump != nil && request.editingEvent == nil) ? .timer : .manual
+        var initPumpVolumeMode: PumpVolumeMode = .bySide
+        var initPumpLeftAmount = ""
+        var initPumpRightAmount = ""
+        var initFocusedPumpVolumeSide: BreastSide = .left
+        var initSplitPumpTimes = false
         var initPumpDuration = ""
-        if request.kind == .pump && request.editingEvent == nil, let activePump = store.activePump {
-            initPumpSide = activePump.side
-            initAmount = ""
-        }
+        var initPumpLeftDuration = ""
+        var initPumpRightDuration = ""
+        var initFocusedPumpDurationSide: BreastSide = .left
+
         var initNurseMode: NursingInputMode = .timer
-        var initNurseMinutes = "10"
-        var initNurseSide: BreastSide = {
+        var initNurseLeftMinutes = ""
+        var initNurseRightMinutes = ""
+        var initFocusedNursingSide: BreastSide = {
             switch store.lastNursingSideInfo?.side {
             case .left: .right
             case .right: .left
             case .both, .none: .left
             }
         }()
-        var initNurseLastSide: BreastSide = initNurseSide == .left ? .right : .left
+        var initNurseLastSide: BreastSide = initFocusedNursingSide
+        var initUserSelectedNursingLastSide = false
+
         var initPee: DiaperSelection = .medium
         var initPoop: DiaperSelection = .none
         var initPoopColor: PoopColor? = nil
@@ -243,16 +277,51 @@ public struct LogSheetView: View {
 
             case .feeding(let meta):
                 if meta.method == .breast {
-                    let mins = meta.durationMinutes
-                        ?? editing.endedAt.map { max(1, $0.timeIntervalSince(editing.startedAt) / 60.0) }
-                        ?? max(1, Double((meta.leftDurationSeconds ?? 0) + (meta.rightDurationSeconds ?? 0)) / 60.0)
-                    initNurseMinutes = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
-                    initNurseSide = meta.side ?? .left
+                    let lSec = meta.leftDurationSeconds ?? 0
+                    let rSec = meta.rightDurationSeconds ?? 0
+                    if lSec > 0 || rSec > 0 {
+                        initNurseLeftMinutes = lSec > 0
+                            ? FormattingHelpers.formatNumber(max(0.1, Double(lSec) / 60.0), maxFractionDigits: 1)
+                            : ""
+                        initNurseRightMinutes = rSec > 0
+                            ? FormattingHelpers.formatNumber(max(0.1, Double(rSec) / 60.0), maxFractionDigits: 1)
+                            : ""
+                    } else {
+                        let mins = meta.durationMinutes
+                            ?? editing.endedAt.map { max(1, $0.timeIntervalSince(editing.startedAt) / 60.0) }
+                            ?? 0
+                        if mins > 0 {
+                            switch meta.side {
+                            case .left:
+                                initNurseLeftMinutes = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
+                                initNurseRightMinutes = ""
+                            case .right:
+                                initNurseLeftMinutes = ""
+                                initNurseRightMinutes = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
+                            case .both, .none:
+                                let half = FormattingHelpers.formatNumber(mins / 2.0, maxFractionDigits: 1)
+                                initNurseLeftMinutes = half
+                                initNurseRightMinutes = half
+                            }
+                        } else {
+                            initNurseLeftMinutes = ""
+                            initNurseRightMinutes = ""
+                        }
+                    }
+
+                    let hasLeft = (Double(initNurseLeftMinutes) ?? 0) > 0
+                    let hasRight = (Double(initNurseRightMinutes) ?? 0) > 0
+                    initFocusedNursingSide = (!hasLeft && hasRight) ? .right : .left
                     if let storedLast = meta.lastSide, storedLast == .left || storedLast == .right {
                         initNurseLastSide = storedLast
+                    } else if hasRight && !hasLeft {
+                        initNurseLastSide = .right
+                    } else if hasLeft && !hasRight {
+                        initNurseLastSide = .left
                     } else {
                         initNurseLastSide = meta.side == .left ? .left : .right
                     }
+                    initUserSelectedNursingLastSide = true
                 } else {
                     initUnit = meta.displayUnit
                     if let ml = meta.amountMl {
@@ -267,21 +336,109 @@ public struct LogSheetView: View {
 
             case .pump(let meta):
                 initUnit = meta.displayUnit
-                if let ml = meta.amountMl {
+                let formatPumpVol: (Double) -> String = { ml in
                     let displayed = initUnit == .oz ? UnitConversion.mlToOz(ml) : ml
-                    initAmount = FormattingHelpers.formatNumber(
+                    return FormattingHelpers.formatNumber(
                         displayed,
                         maxFractionDigits: initUnit == .oz ? 2 : 1
                     )
-                } else {
-                    initAmount = ""
                 }
-                initPumpSide = meta.side
-                if let mins = meta.durationMinutes
-                    ?? editing.endedAt.map({ max(0, $0.timeIntervalSince(editing.startedAt) / 60.0) }),
-                   mins > 0
-                {
-                    initPumpDuration = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
+
+                if meta.leftAmountMl != nil || meta.rightAmountMl != nil {
+                    initPumpVolumeMode = .bySide
+                    if let leftMl = meta.leftAmountMl, leftMl > 0 {
+                        initPumpLeftAmount = formatPumpVol(leftMl)
+                    } else {
+                        initPumpLeftAmount = ""
+                    }
+                    if let rightMl = meta.rightAmountMl, rightMl > 0 {
+                        initPumpRightAmount = formatPumpVol(rightMl)
+                    } else {
+                        initPumpRightAmount = ""
+                    }
+                    initAmount = ""
+                    initFocusedPumpVolumeSide = (initPumpLeftAmount.isEmpty && !initPumpRightAmount.isEmpty) ? .right : .left
+                } else if meta.side == .left {
+                    initPumpVolumeMode = .bySide
+                    if let ml = meta.amountMl, ml > 0 {
+                        initPumpLeftAmount = formatPumpVol(ml)
+                    } else {
+                        initPumpLeftAmount = ""
+                    }
+                    initPumpRightAmount = ""
+                    initAmount = ""
+                    initFocusedPumpVolumeSide = .left
+                } else if meta.side == .right {
+                    initPumpVolumeMode = .bySide
+                    initPumpLeftAmount = ""
+                    if let ml = meta.amountMl, ml > 0 {
+                        initPumpRightAmount = formatPumpVol(ml)
+                    } else {
+                        initPumpRightAmount = ""
+                    }
+                    initAmount = ""
+                    initFocusedPumpVolumeSide = .right
+                } else {
+                    initPumpVolumeMode = .combined
+                    if let ml = meta.amountMl, ml > 0 {
+                        initAmount = formatPumpVol(ml)
+                    } else {
+                        initAmount = ""
+                    }
+                    initPumpLeftAmount = ""
+                    initPumpRightAmount = ""
+                    initFocusedPumpVolumeSide = .left
+                }
+
+                let lSec = meta.leftDurationSeconds ?? 0
+                let rSec = meta.rightDurationSeconds ?? 0
+                if lSec > 0 && rSec > 0 {
+                    if abs(lSec - rSec) >= 30 {
+                        initSplitPumpTimes = true
+                        initPumpLeftDuration = FormattingHelpers.formatNumber(
+                            max(0.1, Double(lSec) / 60.0),
+                            maxFractionDigits: 1
+                        )
+                        initPumpRightDuration = FormattingHelpers.formatNumber(
+                            max(0.1, Double(rSec) / 60.0),
+                            maxFractionDigits: 1
+                        )
+                        initPumpDuration = ""
+                    } else {
+                        initSplitPumpTimes = false
+                        let mins = meta.durationMinutes ?? (Double(max(lSec, rSec)) / 60.0)
+                        initPumpDuration = mins > 0
+                            ? FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
+                            : ""
+                    }
+                } else if lSec > 0 && rSec == 0 && (meta.amountMl ?? 0) <= 0 {
+                    initSplitPumpTimes = true
+                    initPumpLeftDuration = FormattingHelpers.formatNumber(
+                        max(0.1, Double(lSec) / 60.0),
+                        maxFractionDigits: 1
+                    )
+                    initPumpRightDuration = ""
+                    initPumpDuration = ""
+                    initFocusedPumpDurationSide = .left
+                } else if rSec > 0 && lSec == 0 && (meta.amountMl ?? 0) <= 0 {
+                    initSplitPumpTimes = true
+                    initPumpLeftDuration = ""
+                    initPumpRightDuration = FormattingHelpers.formatNumber(
+                        max(0.1, Double(rSec) / 60.0),
+                        maxFractionDigits: 1
+                    )
+                    initPumpDuration = ""
+                    initFocusedPumpDurationSide = .right
+                } else {
+                    initSplitPumpTimes = false
+                    if let mins = meta.durationMinutes
+                        ?? editing.endedAt.map({ max(0, $0.timeIntervalSince(editing.startedAt) / 60.0) }),
+                       mins > 0
+                    {
+                        initPumpDuration = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
+                    } else {
+                        initPumpDuration = ""
+                    }
                 }
 
             case .diaper(let meta):
@@ -335,13 +492,22 @@ public struct LogSheetView: View {
         _amountText = State(initialValue: initAmount)
         _volumeUnit = State(initialValue: initUnit)
         _substance = State(initialValue: initSubstance)
-        _pumpSide = State(initialValue: initPumpSide)
         _pumpMode = State(initialValue: initPumpMode)
+        _pumpVolumeMode = State(initialValue: initPumpVolumeMode)
+        _pumpLeftAmountText = State(initialValue: initPumpLeftAmount)
+        _pumpRightAmountText = State(initialValue: initPumpRightAmount)
+        _focusedPumpVolumeSide = State(initialValue: initFocusedPumpVolumeSide)
+        _splitPumpTimes = State(initialValue: initSplitPumpTimes)
         _pumpDurationText = State(initialValue: initPumpDuration)
+        _pumpLeftDurationText = State(initialValue: initPumpLeftDuration)
+        _pumpRightDurationText = State(initialValue: initPumpRightDuration)
+        _focusedPumpDurationSide = State(initialValue: initFocusedPumpDurationSide)
         _nursingMode = State(initialValue: initNurseMode)
-        _nursingMinutesText = State(initialValue: initNurseMinutes)
-        _nursingSide = State(initialValue: initNurseSide)
+        _nursingLeftMinutesText = State(initialValue: initNurseLeftMinutes)
+        _nursingRightMinutesText = State(initialValue: initNurseRightMinutes)
+        _focusedNursingSide = State(initialValue: initFocusedNursingSide)
         _nursingLastSide = State(initialValue: initNurseLastSide)
+        _userSelectedNursingLastSide = State(initialValue: initUserSelectedNursingLastSide)
         _peeSelection = State(initialValue: initPee)
         _poopSelection = State(initialValue: initPoop)
         _poopColor = State(initialValue: initPoopColor)
@@ -427,6 +593,100 @@ public struct LogSheetView: View {
         return (start, end, minutes, startedYesterday)
     }
 
+    private var parsedNursingLeftMinutes: Double {
+        max(0, Double(nursingLeftMinutesText) ?? 0)
+    }
+
+    private var parsedNursingRightMinutes: Double {
+        max(0, Double(nursingRightMinutesText) ?? 0)
+    }
+
+    private var parsedPumpLeftAmount: Double {
+        max(0, Double(pumpLeftAmountText) ?? 0)
+    }
+
+    private var parsedPumpRightAmount: Double {
+        max(0, Double(pumpRightAmountText) ?? 0)
+    }
+
+    private var parsedPumpSharedDuration: Double {
+        max(0, Double(pumpDurationText) ?? 0)
+    }
+
+    private var parsedPumpLeftDuration: Double {
+        max(0, Double(pumpLeftDurationText) ?? 0)
+    }
+
+    private var parsedPumpRightDuration: Double {
+        max(0, Double(pumpRightDurationText) ?? 0)
+    }
+
+    private var resolvedManualPumpInput: ResolvedPumpInput {
+        let leftAmt = pumpVolumeMode == .bySide ? parsedPumpLeftAmount : 0
+        let rightAmt = pumpVolumeMode == .bySide ? parsedPumpRightAmount : 0
+        let combinedAmt = pumpVolumeMode == .combined ? max(0, Double(amountText) ?? 0) : 0
+        let totalDisplayAmount = pumpVolumeMode == .bySide ? (leftAmt + rightAmt) : combinedAmt
+
+        let leftDur: Double?
+        let rightDur: Double?
+        let sessionDur: Double?
+
+        if splitPumpTimes {
+            leftDur = parsedPumpLeftDuration > 0 ? parsedPumpLeftDuration : nil
+            rightDur = parsedPumpRightDuration > 0 ? parsedPumpRightDuration : nil
+            if leftDur != nil || rightDur != nil {
+                sessionDur = max(leftDur ?? 0, rightDur ?? 0)
+            } else {
+                sessionDur = nil
+            }
+        } else {
+            let sharedDur = parsedPumpSharedDuration > 0 ? parsedPumpSharedDuration : nil
+            sessionDur = sharedDur
+            if let sharedDur {
+                if leftAmt > 0 && rightAmt <= 0 {
+                    leftDur = sharedDur
+                    rightDur = nil
+                } else if rightAmt > 0 && leftAmt <= 0 {
+                    leftDur = nil
+                    rightDur = sharedDur
+                } else if leftAmt > 0 && rightAmt > 0 {
+                    leftDur = sharedDur
+                    rightDur = sharedDur
+                } else {
+                    leftDur = nil
+                    rightDur = nil
+                }
+            } else {
+                leftDur = nil
+                rightDur = nil
+            }
+        }
+
+        let hasLeft = leftAmt > 0 || (leftDur ?? 0) > 0
+        let hasRight = rightAmt > 0 || (rightDur ?? 0) > 0
+        let derivedSide: BreastSide
+        if hasLeft && hasRight {
+            derivedSide = .both
+        } else if hasLeft {
+            derivedSide = .left
+        } else if hasRight {
+            derivedSide = .right
+        } else {
+            derivedSide = .both
+        }
+
+        return ResolvedPumpInput(
+            combinedAmount: combinedAmt > 0 ? combinedAmt : nil,
+            leftAmount: leftAmt > 0 ? leftAmt : nil,
+            rightAmount: rightAmt > 0 ? rightAmt : nil,
+            totalDisplayAmount: totalDisplayAmount,
+            sessionDurationMinutes: sessionDur,
+            leftDurationMinutes: leftDur,
+            rightDurationMinutes: rightDur,
+            side: derivedSide
+        )
+    }
+
     private var canCommit: Bool {
         switch request.kind {
         case .sleep:
@@ -436,14 +696,15 @@ public struct LogSheetView: View {
             if isNursingTimerMode {
                 return store.activeNursing != nil
             }
-            return (Double(nursingMinutesText) ?? 0) > 0
+            return (parsedNursingLeftMinutes + parsedNursingRightMinutes) > 0
         case .feeding:
             return (Double(amountText) ?? 0) > 0
         case .pump:
             if isPumpTimerMode {
                 return store.activePump != nil
             }
-            return (Double(amountText) ?? 0) > 0 || (Double(pumpDurationText) ?? 0) > 0
+            let resolved = resolvedManualPumpInput
+            return resolved.totalDisplayAmount > 0 || (resolved.sessionDurationMinutes ?? 0) > 0
         case .diaper, .meal, .bath, .medicine, .note:
             return true
         }
@@ -480,22 +741,25 @@ public struct LogSheetView: View {
             return "Log \(shown) \(volumeUnitLabel(volumeUnit))"
 
         case .nursing:
-            let mins = nursingMinutesText.isEmpty ? "0" : nursingMinutesText
-            return "Log \(mins) min nursing"
+            let total = parsedNursingLeftMinutes + parsedNursingRightMinutes
+            guard total > 0 else {
+                return "Enter minutes"
+            }
+            let formatted = FormattingHelpers.formatNumber(total, maxFractionDigits: 1)
+            return "Log \(formatted) min nursing"
 
         case .pump:
-            let parsedAmount = max(0, Double(amountText) ?? 0)
-            let parsedDuration = max(0, Double(pumpDurationText) ?? 0)
+            let resolved = resolvedManualPumpInput
             var parts: [String] = []
-            if parsedAmount > 0 {
-                parts.append(FormattingHelpers.formatAmount(parsedAmount, unit: volumeUnit))
+            if resolved.totalDisplayAmount > 0 {
+                parts.append(FormattingHelpers.formatAmount(resolved.totalDisplayAmount, unit: volumeUnit))
             }
-            if parsedDuration > 0 {
-                let mins = FormattingHelpers.formatNumber(parsedDuration, maxFractionDigits: 1)
+            if let sessionDur = resolved.sessionDurationMinutes, sessionDur > 0 {
+                let mins = FormattingHelpers.formatNumber(sessionDur, maxFractionDigits: 1)
                 parts.append("\(mins)m")
             }
             if parts.isEmpty {
-                return "Log pump"
+                return "Enter output or time"
             }
             return "Log \(parts.joined(separator: " · ")) pumped"
 
@@ -579,7 +843,10 @@ public struct LogSheetView: View {
                     } else if isPumpTimerMode {
                         LivePumpCommitButton(
                             store: store,
-                            amountText: amountText,
+                            isBySideVolumeMode: pumpVolumeMode == .bySide,
+                            combinedAmountText: amountText,
+                            leftAmountText: pumpLeftAmountText,
+                            rightAmountText: pumpRightAmountText,
                             volumeUnit: volumeUnit,
                             canCommit: canCommit,
                             action: commit
@@ -614,6 +881,18 @@ public struct LogSheetView: View {
                 return
             }
             mealSlot = store.classifyMealSlot(for: newTime)
+        }
+        .onChange(of: nursingLeftMinutesText) { _, newValue in
+            guard request.kind == .nursing else { return }
+            if (Double(newValue) ?? 0) > 0 && !userSelectedNursingLastSide {
+                nursingLastSide = .left
+            }
+        }
+        .onChange(of: nursingRightMinutesText) { _, newValue in
+            guard request.kind == .nursing else { return }
+            if (Double(newValue) ?? 0) > 0 && !userSelectedNursingLastSide {
+                nursingLastSide = .right
+            }
         }
     }
 
@@ -763,6 +1042,9 @@ public struct LogSheetView: View {
                 }
             }
         } else {
+            let lastInfo = store.lastNursingSideInfo
+            let focusedLabel = focusedNursingSide == .left ? "Left" : "Right"
+
             VStack(alignment: .leading, spacing: BLSpacing.space5) {
                 if !isEditing {
                     BLSegmentedControl(
@@ -772,34 +1054,66 @@ public struct LogSheetView: View {
                     ) { $0.rawValue }
                 }
 
-                BLAmountField(text: $nursingMinutesText, unit: "min")
+                VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                    HStack(spacing: BLSpacing.space2) {
+                        sideInputCard(
+                            label: "Left",
+                            text: $nursingLeftMinutesText,
+                            unit: "min",
+                            isFocused: focusedNursingSide == .left,
+                            accentColor: theme.event(.nursing).solid,
+                            showLastBadge: !isEditing && lastInfo?.side == .left
+                        ) {
+                            focusedNursingSide = .left
+                        }
 
-                presetChipsRow(presets: Self.nurseMinutePresets, selected: nursingMinutesText) { chosen in
-                    nursingMinutesText = chosen
-                }
+                        sideInputCard(
+                            label: "Right",
+                            text: $nursingRightMinutesText,
+                            unit: "min",
+                            isFocused: focusedNursingSide == .right,
+                            accentColor: theme.event(.nursing).solid,
+                            showLastBadge: !isEditing && lastInfo?.side == .right
+                        ) {
+                            focusedNursingSide = .right
+                        }
+                    }
 
-                labeledField("Side") {
-                    BLSegmentedControl(
-                        options: [BreastSide.left, .right, .both],
-                        selection: $nursingSide,
-                        size: .lg,
-                        isBlock: true
-                    ) { sideShortLabel($0) }
+                    presetChipsRow(
+                        presets: Self.nurseMinutePresets,
+                        selected: focusedNursingSide == .left ? nursingLeftMinutesText : nursingRightMinutesText
+                    ) { chosen in
+                        if focusedNursingSide == .left {
+                            nursingLeftMinutesText = (nursingLeftMinutesText == chosen ? "" : chosen)
+                        } else {
+                            nursingRightMinutesText = (nursingRightMinutesText == chosen ? "" : chosen)
+                        }
+                    }
 
-                    if !isEditing, let last = store.lastNursingSideInfo {
+                    if !isEditing {
                         Text(
-                            "Last ended on \(sideShortLabel(last.side)) at \(FormattingHelpers.formatClock(last.at, timeZone: store.profileTimeZone))."
+                            lastInfo.map { last in
+                                "Last ended on \(sideShortLabel(last.side)) · \(FormattingHelpers.formatClock(last.at, timeZone: store.profileTimeZone)). Presets fill \(focusedLabel)."
+                            } ?? "Presets fill \(focusedLabel)."
                         )
                         .blTextRole(.caption)
                         .foregroundStyle(theme.textSecondary)
                     }
                 }
 
-                if nursingSide == .both {
+                if parsedNursingLeftMinutes > 0 && parsedNursingRightMinutes > 0 {
+                    let endedOnBinding = Binding<BreastSide>(
+                        get: { nursingLastSide },
+                        set: { newSide in
+                            userSelectedNursingLastSide = true
+                            nursingLastSide = newSide
+                        }
+                    )
+
                     labeledField("Ended on") {
                         BLSegmentedControl(
                             options: [BreastSide.left, .right],
-                            selection: $nursingLastSide,
+                            selection: endedOnBinding,
                             size: .md,
                             isBlock: true
                         ) { sideShortLabel($0) }
@@ -821,26 +1135,24 @@ public struct LogSheetView: View {
                     ) { $0.rawValue }
                 }
 
-                LivePumpTimerSection(
-                    store: store,
-                    idleSide: $pumpSide,
-                    onStartTimer: {
-                        amountText = ""
-                    }
-                )
+                LivePumpTimerSection(store: store)
 
-                if store.activePump != nil {
-                    labeledField("Output (optional)") {
-                        VStack(alignment: .leading, spacing: BLSpacing.space3) {
-                            volumeAmountRow
+                if let session = store.activePump {
+                    let leftUsed = session.leftAccumulatedSeconds > 0 || session.isLeftRunning
+                    let rightUsed = session.rightAccumulatedSeconds > 0 || session.isRightRunning
 
-                            presetChipsRow(
-                                presets: volumeUnit == .oz ? Self.pumpOzPresets : Self.pumpMlPresets,
-                                selected: amountText
-                            ) { chosen in
-                                amountText = (amountText == chosen ? "" : chosen)
-                            }
-                        }
+                    if leftUsed && !rightUsed {
+                        pumpSingleSideOutputSection(
+                            title: "Left output (optional)",
+                            text: $pumpLeftAmountText
+                        )
+                    } else if rightUsed && !leftUsed {
+                        pumpSingleSideOutputSection(
+                            title: "Right output (optional)",
+                            text: $pumpRightAmountText
+                        )
+                    } else {
+                        pumpOutputSection(title: "Output (optional)")
                     }
                 }
             }
@@ -854,43 +1166,352 @@ public struct LogSheetView: View {
                     ) { $0.rawValue }
                 }
 
-                volumeAmountRow
+                pumpOutputSection(title: "Output")
+
+                pumpDurationSection
+            }
+        }
+    }
+
+    private var pumpVolumeModeBinding: Binding<PumpVolumeMode> {
+        Binding<PumpVolumeMode>(
+            get: { pumpVolumeMode },
+            set: { newMode in
+                guard newMode != pumpVolumeMode else { return }
+                if newMode == .combined {
+                    let sum = parsedPumpLeftAmount + parsedPumpRightAmount
+                    if sum > 0 {
+                        amountText = FormattingHelpers.formatNumber(
+                            sum,
+                            maxFractionDigits: volumeUnit == .oz ? 2 : 1
+                        )
+                    }
+                }
+                pumpVolumeMode = newMode
+            }
+        )
+    }
+
+    private var pumpUnitBinding: Binding<VolumeUnit> {
+        Binding<VolumeUnit>(
+            get: { volumeUnit },
+            set: { newUnit in
+                guard newUnit != volumeUnit else { return }
+                amountText = convertVolumeText(amountText, to: newUnit)
+                pumpLeftAmountText = convertVolumeText(pumpLeftAmountText, to: newUnit)
+                pumpRightAmountText = convertVolumeText(pumpRightAmountText, to: newUnit)
+                volumeUnit = newUnit
+            }
+        )
+    }
+
+    private func convertVolumeText(_ raw: String, to newUnit: VolumeUnit) -> String {
+        guard let parsed = Double(raw), parsed > 0 else { return raw }
+        if newUnit == .ml {
+            let ml = UnitConversion.ozToMl(parsed)
+            let roundedStep = (ml / 5.0).rounded() * 5.0
+            let result = roundedStep > 0 ? roundedStep : max(1.0, ml.rounded())
+            return FormattingHelpers.formatNumber(result, maxFractionDigits: 0)
+        } else {
+            let oz = UnitConversion.mlToOz(parsed)
+            let quarterStep = (oz * 4.0).rounded() / 4.0
+            let result = quarterStep > 0 ? quarterStep : max(0.1, (oz * 10.0).rounded() / 10.0)
+            return FormattingHelpers.formatNumber(result, maxFractionDigits: 2)
+        }
+    }
+
+    private func toggleSplitPumpTimes() {
+        if !splitPumpTimes {
+            let shared = parsedPumpSharedDuration
+            if shared > 0 && pumpLeftDurationText.isEmpty && pumpRightDurationText.isEmpty {
+                let leftAmt = parsedPumpLeftAmount
+                let rightAmt = parsedPumpRightAmount
+                if pumpVolumeMode == .bySide && leftAmt > 0 && rightAmt <= 0 {
+                    pumpLeftDurationText = pumpDurationText
+                    focusedPumpDurationSide = .left
+                } else if pumpVolumeMode == .bySide && rightAmt > 0 && leftAmt <= 0 {
+                    pumpRightDurationText = pumpDurationText
+                    focusedPumpDurationSide = .right
+                } else {
+                    pumpLeftDurationText = pumpDurationText
+                    pumpRightDurationText = pumpDurationText
+                }
+            }
+            splitPumpTimes = true
+        } else {
+            let maxDur = max(parsedPumpLeftDuration, parsedPumpRightDuration)
+            pumpDurationText = maxDur > 0
+                ? FormattingHelpers.formatNumber(maxDur, maxFractionDigits: 1)
+                : ""
+            splitPumpTimes = false
+        }
+    }
+
+    private func pumpSingleSideOutputSection(title: String, text: Binding<String>) -> some View {
+        labeledField(title) {
+            VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                HStack(alignment: .bottom, spacing: BLSpacing.space4) {
+                    BLAmountField(
+                        text: text,
+                        unit: volumeUnitLabel(volumeUnit),
+                        placeholder: "0"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    BLSegmentedControl(
+                        options: [VolumeUnit.oz, .ml],
+                        selection: pumpUnitBinding,
+                        size: .sm
+                    ) { volumeUnitLabel($0) }
+                }
+
+                presetChipsRow(
+                    presets: volumeUnit == .oz ? Self.pumpSideOzPresets : Self.pumpSideMlPresets,
+                    selected: text.wrappedValue
+                ) { chosen in
+                    text.wrappedValue = (text.wrappedValue == chosen ? "" : chosen)
+                }
+            }
+        }
+    }
+
+    private func pumpOutputSection(title: String) -> some View {
+        let leftVal = parsedPumpLeftAmount
+        let rightVal = parsedPumpRightAmount
+        let focusedLabel = focusedPumpVolumeSide == .left ? "Left" : "Right"
+        let bySideCaption: String = {
+            if leftVal > 0 && rightVal > 0 {
+                return "Total \(FormattingHelpers.formatAmount(leftVal + rightVal, unit: volumeUnit))"
+            } else if leftVal > 0 {
+                return "Left side · presets fill \(focusedLabel)"
+            } else if rightVal > 0 {
+                return "Right side · presets fill \(focusedLabel)"
+            } else {
+                return "Optional · presets fill \(focusedLabel)"
+            }
+        }()
+
+        return VStack(alignment: .leading, spacing: BLSpacing.space3) {
+            HStack {
+                Text(title)
+                    .blMicroLabel()
+                Spacer()
+                BLSegmentedControl(
+                    options: PumpVolumeMode.allCases,
+                    selection: pumpVolumeModeBinding,
+                    size: .sm
+                ) { $0.rawValue }
+            }
+
+            if pumpVolumeMode == .bySide {
+                HStack(spacing: BLSpacing.space2) {
+                    sideInputCard(
+                        label: "Left",
+                        text: $pumpLeftAmountText,
+                        unit: volumeUnitLabel(volumeUnit),
+                        isFocused: focusedPumpVolumeSide == .left,
+                        accentColor: theme.event(.pump).solid
+                    ) {
+                        focusedPumpVolumeSide = .left
+                    }
+
+                    sideInputCard(
+                        label: "Right",
+                        text: $pumpRightAmountText,
+                        unit: volumeUnitLabel(volumeUnit),
+                        isFocused: focusedPumpVolumeSide == .right,
+                        accentColor: theme.event(.pump).solid
+                    ) {
+                        focusedPumpVolumeSide = .right
+                    }
+                }
+
+                presetChipsRow(
+                    presets: volumeUnit == .oz ? Self.pumpSideOzPresets : Self.pumpSideMlPresets,
+                    selected: focusedPumpVolumeSide == .left ? pumpLeftAmountText : pumpRightAmountText
+                ) { chosen in
+                    if focusedPumpVolumeSide == .left {
+                        pumpLeftAmountText = (pumpLeftAmountText == chosen ? "" : chosen)
+                    } else {
+                        pumpRightAmountText = (pumpRightAmountText == chosen ? "" : chosen)
+                    }
+                }
+
+                HStack(alignment: .center, spacing: BLSpacing.space2) {
+                    Text(bySideCaption)
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    BLSegmentedControl(
+                        options: [VolumeUnit.oz, .ml],
+                        selection: pumpUnitBinding,
+                        size: .sm
+                    ) { volumeUnitLabel($0) }
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: BLSpacing.space4) {
+                    BLAmountField(
+                        text: $amountText,
+                        unit: volumeUnitLabel(volumeUnit),
+                        placeholder: "0"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    BLSegmentedControl(
+                        options: [VolumeUnit.oz, .ml],
+                        selection: pumpUnitBinding,
+                        size: .sm
+                    ) { volumeUnitLabel($0) }
+                }
 
                 presetChipsRow(
                     presets: volumeUnit == .oz ? Self.pumpOzPresets : Self.pumpMlPresets,
                     selected: amountText
                 ) { chosen in
-                    amountText = chosen
-                }
-
-                labeledField("Pumping time (optional)") {
-                    VStack(alignment: .leading, spacing: BLSpacing.space3) {
-                        BLAmountField(
-                            text: $pumpDurationText,
-                            unit: "min",
-                            size: .md,
-                            placeholder: "0"
-                        )
-
-                        presetChipsRow(
-                            presets: Self.pumpMinutePresets,
-                            selected: pumpDurationText
-                        ) { chosen in
-                            pumpDurationText = (pumpDurationText == chosen ? "" : chosen)
-                        }
-                    }
-                }
-
-                labeledField("Side") {
-                    BLSegmentedControl(
-                        options: [BreastSide.left, .right, .both],
-                        selection: $pumpSide,
-                        size: .lg,
-                        isBlock: true
-                    ) { sideShortLabel($0) }
+                    amountText = (amountText == chosen ? "" : chosen)
                 }
             }
         }
+    }
+
+    private var pumpDurationSection: some View {
+        let leftDur = parsedPumpLeftDuration
+        let rightDur = parsedPumpRightDuration
+        let focusedLabel = focusedPumpDurationSide == .left ? "Left" : "Right"
+        let splitCaption: String = {
+            if leftDur > 0 && rightDur > 0 {
+                let sessionText = FormattingHelpers.formatNumber(max(leftDur, rightDur), maxFractionDigits: 1)
+                return "Session \(sessionText)m · simultaneous"
+            }
+            return "Presets fill \(focusedLabel)."
+        }()
+
+        return VStack(alignment: .leading, spacing: BLSpacing.space3) {
+            HStack {
+                Text("Pumping time (optional)")
+                    .blMicroLabel()
+                Spacer()
+                Button {
+                    toggleSplitPumpTimes()
+                } label: {
+                    Text(splitPumpTimes ? "Same time" : "Different times")
+                        .font(BLFont.ui(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(minHeight: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !splitPumpTimes {
+                BLAmountField(
+                    text: $pumpDurationText,
+                    unit: "min",
+                    size: .md,
+                    placeholder: "0"
+                )
+
+                presetChipsRow(
+                    presets: Self.pumpMinutePresets,
+                    selected: pumpDurationText
+                ) { chosen in
+                    pumpDurationText = (pumpDurationText == chosen ? "" : chosen)
+                }
+            } else {
+                HStack(spacing: BLSpacing.space2) {
+                    sideInputCard(
+                        label: "Left",
+                        text: $pumpLeftDurationText,
+                        unit: "min",
+                        isFocused: focusedPumpDurationSide == .left,
+                        accentColor: theme.event(.pump).solid
+                    ) {
+                        focusedPumpDurationSide = .left
+                    }
+
+                    sideInputCard(
+                        label: "Right",
+                        text: $pumpRightDurationText,
+                        unit: "min",
+                        isFocused: focusedPumpDurationSide == .right,
+                        accentColor: theme.event(.pump).solid
+                    ) {
+                        focusedPumpDurationSide = .right
+                    }
+                }
+
+                presetChipsRow(
+                    presets: Self.pumpMinutePresets,
+                    selected: focusedPumpDurationSide == .left ? pumpLeftDurationText : pumpRightDurationText
+                ) { chosen in
+                    if focusedPumpDurationSide == .left {
+                        pumpLeftDurationText = (pumpLeftDurationText == chosen ? "" : chosen)
+                    } else {
+                        pumpRightDurationText = (pumpRightDurationText == chosen ? "" : chosen)
+                    }
+                }
+
+                Text(splitCaption)
+                    .blTextRole(.caption)
+                    .foregroundStyle(theme.textSecondary)
+            }
+        }
+    }
+
+    private func sideInputCard(
+        label: String,
+        text: Binding<String>,
+        unit: String,
+        isFocused: Bool,
+        accentColor: Color,
+        showLastBadge: Bool = false,
+        onSelect: @escaping () -> Void
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: BLRadius.md, style: .continuous)
+        let trackedText = Binding<String>(
+            get: { text.wrappedValue },
+            set: { newValue in
+                if newValue != text.wrappedValue {
+                    onSelect()
+                }
+                text.wrappedValue = newValue
+            }
+        )
+
+        return VStack(alignment: .leading, spacing: BLSpacing.space2) {
+            HStack(spacing: BLSpacing.space1) {
+                Text(label)
+                    .blMicroLabel()
+                Spacer(minLength: 4)
+                if showLastBadge {
+                    BLBadge("Last", tone: .neutral)
+                }
+            }
+            .frame(minHeight: 22)
+
+            BLAmountField(
+                text: trackedText,
+                unit: unit,
+                size: .md,
+                placeholder: "0"
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(shape.fill(theme.bgSurface))
+        .overlay(
+            shape.strokeBorder(
+                isFocused ? accentColor : theme.borderHairline,
+                lineWidth: isFocused ? 1.5 : BLSpacing.borderWidth
+            )
+        )
+        .contentShape(shape)
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                onSelect()
+            }
+        )
     }
 
     private var diaperForm: some View {
@@ -1215,34 +1836,63 @@ public struct LogSheetView: View {
                 guard store.activeNursing != nil else { return }
                 store.finishNursing()
             } else {
-                let mins = max(0, Double(nursingMinutesText) ?? 0)
-                guard mins > 0 else { return }
+                let leftMins = parsedNursingLeftMinutes
+                let rightMins = parsedNursingRightMinutes
+                guard leftMins + rightMins > 0 else { return }
                 store.logManualNursing(
                     startedAt: timestamp,
-                    minutes: mins,
-                    side: nursingSide,
-                    lastSide: nursingSide == .both ? nursingLastSide : nursingSide
+                    leftMinutes: leftMins,
+                    rightMinutes: rightMins,
+                    lastSide: (leftMins > 0 && rightMins > 0) ? nursingLastSide : nil
                 )
             }
 
         case .pump:
-            let parsedAmount = max(0, Double(amountText) ?? 0)
             if isPumpTimerMode {
-                guard store.activePump != nil else { return }
-                store.finishPumpTimer(
-                    amount: parsedAmount > 0 ? parsedAmount : nil,
-                    unit: volumeUnit,
-                    side: store.activePump?.side ?? pumpSide
-                )
+                guard let session = store.activePump else { return }
+                let leftUsed = session.leftAccumulatedSeconds > 0 || session.isLeftRunning
+                let rightUsed = session.rightAccumulatedSeconds > 0 || session.isRightRunning
+                let leftVal = parsedPumpLeftAmount
+                let rightVal = parsedPumpRightAmount
+                let combinedVal = max(0, Double(amountText) ?? 0)
+
+                if leftUsed && !rightUsed {
+                    store.finishPumpTimer(
+                        leftAmount: leftVal > 0 ? leftVal : nil,
+                        unit: volumeUnit
+                    )
+                } else if rightUsed && !leftUsed {
+                    store.finishPumpTimer(
+                        rightAmount: rightVal > 0 ? rightVal : nil,
+                        unit: volumeUnit
+                    )
+                } else if pumpVolumeMode == .bySide {
+                    store.finishPumpTimer(
+                        leftAmount: leftVal > 0 ? leftVal : nil,
+                        rightAmount: rightVal > 0 ? rightVal : nil,
+                        unit: volumeUnit
+                    )
+                } else {
+                    store.finishPumpTimer(
+                        amount: combinedVal > 0 ? combinedVal : nil,
+                        unit: volumeUnit
+                    )
+                }
             } else {
-                let parsedDuration = max(0, Double(pumpDurationText) ?? 0)
-                guard parsedAmount > 0 || parsedDuration > 0 else { return }
+                let resolved = resolvedManualPumpInput
+                guard resolved.totalDisplayAmount > 0 || (resolved.sessionDurationMinutes ?? 0) > 0 else {
+                    return
+                }
                 store.logPump(
                     startedAt: timestamp,
-                    amount: parsedAmount,
+                    amount: resolved.combinedAmount ?? 0,
                     unit: volumeUnit,
-                    side: pumpSide,
-                    durationMinutes: parsedDuration > 0 ? parsedDuration : nil
+                    side: resolved.side,
+                    durationMinutes: resolved.sessionDurationMinutes,
+                    leftAmount: resolved.leftAmount,
+                    rightAmount: resolved.rightAmount,
+                    leftDurationMinutes: resolved.leftDurationMinutes,
+                    rightDurationMinutes: resolved.rightDurationMinutes
                 )
             }
 
@@ -1325,36 +1975,65 @@ public struct LogSheetView: View {
             )
 
         case .nursing:
-            let mins = max(0, Double(nursingMinutesText) ?? 0)
+            let leftMins = parsedNursingLeftMinutes
+            let rightMins = parsedNursingRightMinutes
+            let total = leftMins + rightMins
+            guard total > 0 else { return }
+            let side: BreastSide = (leftMins > 0 && rightMins > 0)
+                ? .both
+                : (leftMins > 0 ? .left : .right)
+            let leftDurationSeconds = leftMins > 0 ? Int((leftMins * 60.0).rounded()) : nil
+            let rightDurationSeconds = rightMins > 0 ? Int((rightMins * 60.0).rounded()) : nil
+            let resolvedLastSide: BreastSide = (side == .both) ? nursingLastSide : side
             updated.startedAt = timestamp
-            updated.endedAt = timestamp.addingTimeInterval(mins * 60.0)
+            updated.endedAt = timestamp.addingTimeInterval(total * 60.0)
             updated.metadata = .feeding(
                 FeedingMetadata(
                     method: .breast,
                     substance: .breastMilk,
                     amountMl: nil,
                     displayUnit: store.preferredUnit,
-                    side: nursingSide,
-                    durationMinutes: mins,
-                    lastSide: nursingSide == .both ? nursingLastSide : nursingSide
+                    side: side,
+                    durationMinutes: total,
+                    leftDurationSeconds: leftDurationSeconds,
+                    rightDurationSeconds: rightDurationSeconds,
+                    lastSide: resolvedLastSide
                 )
             )
 
         case .pump:
-            let parsedAmount = max(0, Double(amountText) ?? 0)
-            let parsedDuration = max(0, Double(pumpDurationText) ?? 0)
-            guard parsedAmount > 0 || parsedDuration > 0 else { return }
-            let amountMl: Double? = parsedAmount > 0
-                ? (volumeUnit == .oz ? UnitConversion.ozToMl(parsedAmount) : parsedAmount)
-                : nil
+            let resolved = resolvedManualPumpInput
+            guard resolved.totalDisplayAmount > 0 || (resolved.sessionDurationMinutes ?? 0) > 0 else {
+                return
+            }
+            let toMl: (Double) -> Double = { value in
+                volumeUnit == .oz ? UnitConversion.ozToMl(value) : value
+            }
+            let leftMl = resolved.leftAmount.map(toMl)
+            let rightMl = resolved.rightAmount.map(toMl)
+            let totalMl: Double? = {
+                if leftMl != nil || rightMl != nil {
+                    return (leftMl ?? 0) + (rightMl ?? 0)
+                }
+                if let combined = resolved.combinedAmount {
+                    return toMl(combined)
+                }
+                return nil
+            }()
+            let leftSec = resolved.leftDurationMinutes.map { max(1, Int(($0 * 60.0).rounded())) }
+            let rightSec = resolved.rightDurationMinutes.map { max(1, Int(($0 * 60.0).rounded())) }
             updated.startedAt = timestamp
-            updated.endedAt = parsedDuration > 0 ? timestamp.addingTimeInterval(parsedDuration * 60.0) : nil
+            updated.endedAt = resolved.sessionDurationMinutes.map { timestamp.addingTimeInterval($0 * 60.0) }
             updated.metadata = .pump(
                 PumpMetadata(
-                    amountMl: amountMl,
+                    amountMl: totalMl,
                     displayUnit: volumeUnit,
-                    side: pumpSide,
-                    durationMinutes: parsedDuration > 0 ? parsedDuration : nil
+                    side: resolved.side,
+                    durationMinutes: resolved.sessionDurationMinutes,
+                    leftAmountMl: leftMl,
+                    rightAmountMl: rightMl,
+                    leftDurationSeconds: leftSec,
+                    rightDurationSeconds: rightSec
                 )
             )
 
@@ -1517,20 +2196,11 @@ private struct LiveNursingCommitButton: View {
 private struct LivePumpTimerSection: View {
     @Environment(\.blTheme) private var theme
     let store: BlythesLifeStore
-    @Binding var idleSide: BreastSide
-    var onStartTimer: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: BLSpacing.space4) {
             if let session = store.activePump {
                 let elapsed = session.elapsedSeconds(asOf: store.now)
-                let activeSideBinding = Binding<BreastSide>(
-                    get: { session.side },
-                    set: { newSide in
-                        idleSide = newSide
-                        store.setActivePumpSide(newSide)
-                    }
-                )
 
                 HStack {
                     Text("Started \(FormattingHelpers.formatClock(session.startedAt, timeZone: store.profileTimeZone))")
@@ -1540,75 +2210,42 @@ private struct LivePumpTimerSection: View {
                 }
                 .frame(minHeight: 36)
 
-                Text(FormattingHelpers.formatMMSS(seconds: Int(elapsed)))
-                    .blTextRole(.timer)
-                    .foregroundStyle(theme.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-
-                BLButton(
-                    session.isRunning ? "Pause" : "Resume",
-                    variant: .secondary,
-                    size: .md,
-                    isBlock: true,
-                    icon: session.isRunning ? BLSymbol.pause : BLSymbol.play
-                ) {
-                    store.startOrTogglePumpTimer(side: session.side)
-                }
-
-                VStack(alignment: .leading, spacing: BLSpacing.space2) {
-                    Text("Side")
-                        .blMicroLabel()
-                    BLSegmentedControl(
-                        options: [BreastSide.left, .right, .both],
-                        selection: activeSideBinding,
-                        size: .md,
-                        isBlock: true
-                    ) { side in
-                        sideLabel(side)
+                BLPumpTimer(
+                    sessionSeconds: Int(elapsed.session),
+                    leftSeconds: Int(elapsed.left),
+                    rightSeconds: Int(elapsed.right),
+                    isLeftRunning: session.isLeftRunning,
+                    isRightRunning: session.isRightRunning,
+                    onTapSide: { sideId in
+                        store.tapPumpSide(sideId == "right" ? .right : .left)
+                    },
+                    onToggleBoth: {
+                        store.togglePumpBoth()
                     }
-                }
+                )
 
                 Text("Runs while you close this.")
                     .blTextRole(.callout)
                     .foregroundStyle(theme.textSecondary)
             } else {
-                Text("0:00")
-                    .blTextRole(.timer)
-                    .foregroundStyle(theme.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-
-                VStack(alignment: .leading, spacing: BLSpacing.space2) {
-                    Text("Side")
-                        .blMicroLabel()
-                    BLSegmentedControl(
-                        options: [BreastSide.left, .right, .both],
-                        selection: $idleSide,
-                        size: .md,
-                        isBlock: true
-                    ) { side in
-                        sideLabel(side)
+                BLPumpTimer(
+                    sessionSeconds: 0,
+                    leftSeconds: 0,
+                    rightSeconds: 0,
+                    isLeftRunning: false,
+                    isRightRunning: false,
+                    onTapSide: { sideId in
+                        store.tapPumpSide(sideId == "right" ? .right : .left)
+                    },
+                    onToggleBoth: {
+                        store.togglePumpBoth()
                     }
-                }
+                )
 
-                BLButton(
-                    "Start pump timer",
-                    variant: .primary,
-                    size: .md,
-                    isBlock: true,
-                    icon: BLSymbol.play
-                ) {
-                    onStartTimer?()
-                    store.startOrTogglePumpTimer(side: idleSide)
-                }
+                Text("Tap Start both or pick a side.")
+                    .blTextRole(.callout)
+                    .foregroundStyle(theme.textSecondary)
             }
-        }
-    }
-
-    private func sideLabel(_ side: BreastSide) -> String {
-        switch side {
-        case .left: "Left"
-        case .right: "Right"
-        case .both: "Both"
         }
     }
 }
@@ -1616,7 +2253,10 @@ private struct LivePumpTimerSection: View {
 @MainActor
 private struct LivePumpCommitButton: View {
     let store: BlythesLifeStore
-    let amountText: String
+    let isBySideVolumeMode: Bool
+    let combinedAmountText: String
+    let leftAmountText: String
+    let rightAmountText: String
     let volumeUnit: VolumeUnit
     let canCommit: Bool
     let action: () -> Void
@@ -1624,13 +2264,29 @@ private struct LivePumpCommitButton: View {
     var body: some View {
         let title: String = {
             guard let session = store.activePump else {
-                return "Start timer to log"
+                return "Start a side above"
             }
             let elapsed = session.elapsedSeconds(asOf: store.now)
-            let mins = max(1, Int((elapsed / 60.0).rounded()))
-            let parsedAmount = max(0, Double(amountText) ?? 0)
-            if parsedAmount > 0 {
-                let amountLabel = FormattingHelpers.formatAmount(parsedAmount, unit: volumeUnit)
+            let mins = max(1, Int((elapsed.session / 60.0).rounded()))
+            let leftUsed = session.leftAccumulatedSeconds > 0 || session.isLeftRunning
+            let rightUsed = session.rightAccumulatedSeconds > 0 || session.isRightRunning
+            let leftVal = max(0, Double(leftAmountText) ?? 0)
+            let rightVal = max(0, Double(rightAmountText) ?? 0)
+            let combinedVal = max(0, Double(combinedAmountText) ?? 0)
+
+            let totalAmt: Double
+            if leftUsed && !rightUsed {
+                totalAmt = leftVal
+            } else if rightUsed && !leftUsed {
+                totalAmt = rightVal
+            } else if isBySideVolumeMode {
+                totalAmt = leftVal + rightVal
+            } else {
+                totalAmt = combinedVal
+            }
+
+            if totalAmt > 0 {
+                let amountLabel = FormattingHelpers.formatAmount(totalAmt, unit: volumeUnit)
                 return "Log \(amountLabel) · \(mins)m pumped"
             }
             return "Log \(mins)m pumped"

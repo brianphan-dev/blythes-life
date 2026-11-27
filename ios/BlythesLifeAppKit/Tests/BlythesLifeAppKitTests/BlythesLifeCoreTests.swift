@@ -1875,7 +1875,7 @@ struct BlythesLifeStoreTests {
         #expect(csv.contains("Poop S (Green) · Rash"))
     }
 
-    @Test("Pump timer start/pause/resume/finish (with & without volume), Undo, discard, and manual durationMinutes")
+    @Test("Pump timer dual-side lifecycle: simultaneous, pause/resume, Undo, discard, and manual durationMinutes")
     func pumpTimerAndManualDurationLifecycle() throws {
         let storage = InMemoryLocalStateStorage(initialState: SampleSeedData.makeDemoState())
         let store = BlythesLifeStore(
@@ -1886,48 +1886,58 @@ struct BlythesLifeStoreTests {
         )
         let t0 = store.now
 
-        // Start timer
+        // Start timer via compatibility wrapper (both sides simultaneously)
         store.startOrTogglePumpTimer(side: .both)
         let started = try #require(store.activePump)
         #expect(started.isRunning == true)
-        #expect(started.side == .both)
-        #expect(started.elapsedSeconds(asOf: t0) == 0)
+        #expect(started.isBothRunning == true)
+        #expect(started.derivedSide(asOf: t0) == .both)
+        #expect(started.elapsedSeconds(asOf: t0) == (0, 0, 0))
 
-        // Advance 5m, pause
+        // Advance 5m, pause both
         store.tick(now: t0.addingTimeInterval(5 * 60))
-        #expect(store.activePump?.elapsedSeconds(asOf: store.now) == 300)
-        store.startOrTogglePumpTimer()
+        let at5m = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+        #expect(at5m == (300, 300, 300))
+        store.togglePumpBoth()
         #expect(store.activePump?.isRunning == false)
-        #expect(store.activePump?.accumulatedSeconds == 300)
+        #expect(store.activePump?.leftAccumulatedSeconds == 300)
+        #expect(store.activePump?.rightAccumulatedSeconds == 300)
+        #expect(store.activePump?.sessionAccumulatedSeconds == 300)
 
-        // Change side while paused and verify persistence across reload
-        store.setActivePumpSide(.left)
-        #expect(store.activePump?.side == .left)
+        // Verify persistence across reload
         let persisted = try #require(try storage.load())
-        #expect(persisted.activePumpSession?.side == .left)
-        #expect(persisted.activePumpSession?.accumulatedSeconds == 300)
+        #expect(persisted.activePumpSession?.sessionAccumulatedSeconds == 300)
+        #expect(persisted.activePumpSession?.leftAccumulatedSeconds == 300)
+        #expect(persisted.activePumpSession?.rightAccumulatedSeconds == 300)
 
         // Advance 10m while paused -> elapsed must NOT increase
         store.tick(now: t0.addingTimeInterval(15 * 60))
-        #expect(store.activePump?.elapsedSeconds(asOf: store.now) == 300)
+        let whilePaused = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+        #expect(whilePaused == (300, 300, 300))
 
-        // Resume and pump another 10m -> total active time = 15m (wall clock span = 25m)
-        store.startOrTogglePumpTimer()
+        // Resume both and pump another 10m -> active time = 15m (NOT 30m!), wall clock span = 25m
+        store.togglePumpBoth()
         #expect(store.activePump?.isRunning == true)
+        #expect(store.activePump?.isBothRunning == true)
         store.tick(now: t0.addingTimeInterval(25 * 60))
-        #expect(store.activePump?.elapsedSeconds(asOf: store.now) == 900)
+        let at25m = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+        #expect(at25m == (900, 900, 900))
 
-        // Discard + Undo restores paused session with accumulated 900s
+        // Discard + Undo restores paused dual-side session with accumulated 900s
         store.discardPumpTimer()
         #expect(store.activePump == nil)
         #expect(store.toast?.message == "Pump timer discarded")
         store.undoLastToast()
         let restoredAfterDiscard = try #require(store.activePump)
         #expect(restoredAfterDiscard.isRunning == false)
-        #expect(restoredAfterDiscard.accumulatedSeconds == 900)
-        #expect(restoredAfterDiscard.side == .left)
+        #expect(restoredAfterDiscard.leftAccumulatedSeconds == 900)
+        #expect(restoredAfterDiscard.rightAccumulatedSeconds == 900)
+        #expect(restoredAfterDiscard.sessionAccumulatedSeconds == 900)
+        #expect(restoredAfterDiscard.leftSegmentStartedAt == nil)
+        #expect(restoredAfterDiscard.rightSegmentStartedAt == nil)
+        #expect(restoredAfterDiscard.sessionSegmentStartedAt == nil)
 
-        // Finish WITH volume -> logs event + toast + Undo restores paused session
+        // Finish WITH combined volume -> logs event + toast + Undo restores paused session
         let beforeCount = store.activeEvents.count
         let savedWithVolume = try #require(store.finishPumpTimer(amount: 4, unit: .oz, notes: "Morning pump"))
         #expect(store.activePump == nil)
@@ -1935,23 +1945,29 @@ struct BlythesLifeStoreTests {
         #expect(store.toast?.message == "Pump logged · 4 oz · 15m")
         #expect(savedWithVolume.endedAt == t0.addingTimeInterval(25 * 60))
         if case .pump(let meta) = savedWithVolume.metadata {
-            #expect(meta.side == .left)
+            #expect(meta.side == .both)
             #expect(meta.durationMinutes == 15)
+            #expect(meta.leftDurationSeconds == 900)
+            #expect(meta.rightDurationSeconds == 900)
+            #expect(meta.leftAmountMl == nil)
+            #expect(meta.rightAmountMl == nil)
             #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
         } else {
             Issue.record("Expected pump metadata")
         }
-        #expect(store.eventDetail(for: savedWithVolume) == "4 oz · 15m · Left side")
+        #expect(store.eventDetail(for: savedWithVolume) == "4 oz · 15m · Both sides")
 
         // CSV Duration column uses active 15m rather than 25m wall-clock span!
         let csvWithPausedPump = store.exportPediatricianCSVString()
-        #expect(csvWithPausedPump.contains("4 oz · 15m · Left side,15m,Morning pump"))
+        #expect(csvWithPausedPump.contains("4 oz · 15m · Both sides,15m,Morning pump"))
 
         // Undo finish restores paused activePump and removes event
         store.undoLastToast()
         #expect(store.activeEvents.count == beforeCount)
         #expect(store.activePump?.isRunning == false)
-        #expect(store.activePump?.accumulatedSeconds == 900)
+        #expect(store.activePump?.leftAccumulatedSeconds == 900)
+        #expect(store.activePump?.rightAccumulatedSeconds == 900)
+        #expect(store.activePump?.sessionAccumulatedSeconds == 900)
 
         // Finish WITHOUT volume (duration-only)
         let savedDurationOnly = try #require(store.finishPumpTimer())
@@ -1960,11 +1976,13 @@ struct BlythesLifeStoreTests {
         if case .pump(let meta) = savedDurationOnly.metadata {
             #expect(meta.amountMl == nil)
             #expect(meta.durationMinutes == 15)
-            #expect(meta.side == .left)
+            #expect(meta.side == .both)
+            #expect(meta.leftDurationSeconds == 900)
+            #expect(meta.rightDurationSeconds == 900)
         } else {
             Issue.record("Expected pump metadata")
         }
-        #expect(store.eventDetail(for: savedDurationOnly) == "15m · Left side")
+        #expect(store.eventDetail(for: savedDurationOnly) == "15m · Both sides")
 
         // Manual logPump with amount + durationMinutes sets endedAt & formats cleanly
         let manualStart = t0.addingTimeInterval(60 * 60)
@@ -1997,6 +2015,486 @@ struct BlythesLifeStoreTests {
             Issue.record("Expected pump metadata")
         }
         #expect(store.eventDetail(for: manualDurationOnly) == "12m · Right side")
+    }
+
+    @Test("Independent dual-side pump timer union-of-active-intervals math across all real-world pumping patterns")
+    func dualSidePumpTimerUnionIntervalsMath() throws {
+        // 1. Simultaneous double pump for 15m -> L=900, R=900, Session=900 (NOT 1800)
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.togglePumpBoth()
+            store.tick(now: t0.addingTimeInterval(15 * 60))
+            let elapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(elapsed == (900, 900, 900))
+            let saved = try #require(store.finishPumpTimer(leftAmount: 2.5, rightAmount: 1.5, unit: .oz))
+            if case .pump(let meta) = saved.metadata {
+                #expect(meta.side == .both)
+                #expect(meta.durationMinutes == 15)
+                #expect(meta.leftDurationSeconds == 900)
+                #expect(meta.rightDurationSeconds == 900)
+                #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
+                #expect(abs((meta.leftAmountOz ?? 0) - 2.5) < 0.01)
+                #expect(abs((meta.rightAmountOz ?? 0) - 1.5) < 0.01)
+            } else {
+                Issue.record("Expected pump metadata")
+            }
+            #expect(store.eventDetail(for: saved) == "4 oz · 15m · L 2.5 oz, R 1.5 oz")
+        }
+
+        // 2. Staggered finish: togglePumpBoth, pause Left at 12m, finish at 18m -> L=720, R=1080, Session=1080
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.togglePumpBoth()
+            store.tick(now: t0.addingTimeInterval(12 * 60))
+            store.tapPumpSide(.left)
+            #expect(store.activePump?.isLeftRunning == false)
+            #expect(store.activePump?.isRightRunning == true)
+            #expect(store.activePump?.isRunning == true)
+            #expect(store.activePump?.sessionSegmentStartedAt == t0)
+
+            store.tick(now: t0.addingTimeInterval(18 * 60))
+            let elapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(elapsed == (720, 1080, 1080))
+            #expect(store.activePump?.derivedSide(asOf: store.now) == .both)
+
+            let saved = try #require(store.finishPumpTimer(leftAmount: 2.5, rightAmount: 1.5, unit: .oz))
+            if case .pump(let meta) = saved.metadata {
+                #expect(meta.side == .both)
+                #expect(meta.durationMinutes == 18)
+                #expect(meta.leftDurationSeconds == 720)
+                #expect(meta.rightDurationSeconds == 1080)
+                #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
+            } else {
+                Issue.record("Expected pump metadata")
+            }
+            #expect(store.eventDetail(for: saved) == "4 oz · 18m · L 2.5 oz (12m), R 1.5 oz (18m)")
+            #expect(store.toast?.message == "Pump logged · 4 oz · 18m")
+
+            // Undo restores exact paused staggered dual-side state
+            store.undoLastToast()
+            let restored = try #require(store.activePump)
+            #expect(restored.isRunning == false)
+            #expect(restored.leftAccumulatedSeconds == 720)
+            #expect(restored.rightAccumulatedSeconds == 1080)
+            #expect(restored.sessionAccumulatedSeconds == 1080)
+        }
+
+        // 3. Sequential single-side: Left 10m, pause Left, wait 2m, Right 10m, finish -> L=600, R=600, Session=1200 (20m)
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.tapPumpSide(.left)
+            #expect(store.activePump?.isLeftRunning == true)
+            #expect(store.activePump?.isRightRunning == false)
+            store.tick(now: t0.addingTimeInterval(10 * 60))
+            store.tapPumpSide(.left) // pause Left
+            #expect(store.activePump?.isRunning == false)
+            #expect(store.activePump?.sessionAccumulatedSeconds == 600)
+
+            // Wait 2m while both paused
+            store.tick(now: t0.addingTimeInterval(12 * 60))
+            let afterRest = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(afterRest == (600, 0, 600))
+
+            // Pump Right 10m
+            store.tapPumpSide(.right)
+            #expect(store.activePump?.isLeftRunning == false)
+            #expect(store.activePump?.isRightRunning == true)
+            store.tick(now: t0.addingTimeInterval(22 * 60))
+            let afterRight = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(afterRight == (600, 600, 1200))
+
+            let saved = try #require(store.finishPumpTimer())
+            if case .pump(let meta) = saved.metadata {
+                #expect(meta.side == .both)
+                #expect(meta.durationMinutes == 20)
+                #expect(meta.leftDurationSeconds == 600)
+                #expect(meta.rightDurationSeconds == 600)
+                #expect(meta.amountMl == nil)
+            } else {
+                Issue.record("Expected pump metadata")
+            }
+            #expect(store.eventDetail(for: saved) == "20m · Both sides")
+        }
+
+        // 4. Power pumping: Both 20m, pause 10m rest, resume Both 10m -> L=1800, R=1800, Session=1800 (30m)
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.togglePumpBoth()
+            store.tick(now: t0.addingTimeInterval(20 * 60))
+            store.togglePumpBoth() // pause rest
+            #expect(store.activePump?.isRunning == false)
+            store.tick(now: t0.addingTimeInterval(30 * 60))
+            store.togglePumpBoth() // resume both
+            #expect(store.activePump?.isBothRunning == true)
+            store.tick(now: t0.addingTimeInterval(40 * 60))
+            let powerElapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(powerElapsed == (1800, 1800, 1800))
+
+            let saved = try #require(store.finishPumpTimer(amount: 5, unit: .oz))
+            if case .pump(let meta) = saved.metadata {
+                #expect(meta.side == .both)
+                #expect(meta.durationMinutes == 30)
+                #expect(meta.leftDurationSeconds == 1800)
+                #expect(meta.rightDurationSeconds == 1800)
+            } else {
+                Issue.record("Expected pump metadata")
+            }
+        }
+
+        // 5. Single-side timer: Right 12m, finish with rightAmount: 2.5 -> side == .right, rightDurationSeconds == 720, leftDurationSeconds == nil
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.tapPumpSide(.right)
+            #expect(store.activePump?.derivedSide(asOf: t0) == .right)
+            store.tick(now: t0.addingTimeInterval(12 * 60))
+            let singleRightElapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(singleRightElapsed == (0, 720, 720))
+
+            let saved = try #require(store.finishPumpTimer(rightAmount: 2.5, unit: .oz))
+            if case .pump(let meta) = saved.metadata {
+                #expect(meta.side == .right)
+                #expect(meta.durationMinutes == 12)
+                #expect(meta.leftDurationSeconds == nil)
+                #expect(meta.rightDurationSeconds == 720)
+                #expect(meta.leftAmountMl == nil)
+                #expect(abs((meta.rightAmountOz ?? 0) - 2.5) < 0.01)
+                #expect(abs((meta.amountOz ?? 0) - 2.5) < 0.01)
+                #expect(meta.amountMl == meta.rightAmountMl)
+            } else {
+                Issue.record("Expected pump metadata")
+            }
+            #expect(store.eventDetail(for: saved) == "2.5 oz · 12m · Right side")
+            #expect(store.toast?.message == "Pump logged · 2.5 oz · 12m")
+        }
+
+        // 6. Overlapping staggered: Left at t=0, Right at t=5m, pause Left at t=15m, pause Right at t=20m -> L=15m, R=15m, Session=20m
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.tapPumpSide(.left)
+            store.tick(now: t0.addingTimeInterval(5 * 60))
+            store.tapPumpSide(.right)
+            #expect(store.activePump?.isBothRunning == true)
+            #expect(store.activePump?.sessionSegmentStartedAt == t0)
+
+            store.tick(now: t0.addingTimeInterval(15 * 60))
+            store.tapPumpSide(.left) // pause Left; Right still running so sessionSegmentStartedAt stays t0
+            #expect(store.activePump?.isLeftRunning == false)
+            #expect(store.activePump?.isRightRunning == true)
+            #expect(store.activePump?.sessionSegmentStartedAt == t0)
+
+            store.tick(now: t0.addingTimeInterval(20 * 60))
+            store.tapPumpSide(.right) // pause Right -> session flushes to 1200s
+            #expect(store.activePump?.isRunning == false)
+            let elapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(elapsed == (900, 900, 1200))
+
+            let saved = try #require(store.finishPumpTimer())
+            if case .pump(let meta) = saved.metadata {
+                #expect(meta.side == .both)
+                #expect(meta.durationMinutes == 20)
+                #expect(meta.leftDurationSeconds == 900)
+                #expect(meta.rightDurationSeconds == 900)
+            } else {
+                Issue.record("Expected pump metadata")
+            }
+        }
+
+        // 7. togglePumpBoth() pauses when only ONE side is running, then resumes BOTH
+        do {
+            let store = BlythesLifeStore.makeDemo()
+            let t0 = store.now
+            store.tapPumpSide(.left)
+            store.tick(now: t0.addingTimeInterval(5 * 60))
+            store.togglePumpBoth() // pauses Left (only running side)
+            #expect(store.activePump?.isRunning == false)
+            let pausedElapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(pausedElapsed == (300, 0, 300))
+
+            store.tick(now: t0.addingTimeInterval(10 * 60))
+            store.togglePumpBoth() // resumes BOTH sides
+            #expect(store.activePump?.isBothRunning == true)
+            store.tick(now: t0.addingTimeInterval(20 * 60))
+            let resumedElapsed = try #require(store.activePump?.elapsedSeconds(asOf: store.now))
+            #expect(resumedElapsed == (900, 600, 900))
+        }
+    }
+
+    @Test("Manual logPump supports per-side volumes, split durations with max(L,R), single-side, combined, and time-only")
+    func manualPumpPermutationsAndFormatting() throws {
+        let store = BlythesLifeStore.makeDemo()
+        let base = store.now
+
+        // 1. Per-side volumes + shared simultaneous duration
+        let splitVolSharedDur = store.logPump(
+            startedAt: base,
+            unit: .oz,
+            durationMinutes: 15,
+            leftAmount: 2.5,
+            rightAmount: 1.5
+        )
+        #expect(splitVolSharedDur.endedAt == base.addingTimeInterval(15 * 60))
+        if case .pump(let meta) = splitVolSharedDur.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.durationMinutes == 15)
+            #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
+            #expect(abs((meta.leftAmountOz ?? 0) - 2.5) < 0.01)
+            #expect(abs((meta.rightAmountOz ?? 0) - 1.5) < 0.01)
+            #expect(meta.leftDurationSeconds == nil)
+            #expect(meta.rightDurationSeconds == nil)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.toast?.message == "Pump logged · 4 oz · 15m")
+        #expect(store.eventDetail(for: splitVolSharedDur) == "4 oz · 15m · L 2.5 oz, R 1.5 oz")
+
+        // 2. Per-side volumes + split durations -> durationMinutes = max(12, 18) = 18
+        let splitBoth = store.logPump(
+            startedAt: base.addingTimeInterval(60),
+            unit: .oz,
+            leftAmount: 2.5,
+            rightAmount: 1.5,
+            leftDurationMinutes: 12,
+            rightDurationMinutes: 18
+        )
+        #expect(splitBoth.endedAt == base.addingTimeInterval(60 + 18 * 60))
+        if case .pump(let meta) = splitBoth.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.durationMinutes == 18)
+            #expect(meta.leftDurationSeconds == 720)
+            #expect(meta.rightDurationSeconds == 1080)
+            #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
+            #expect(abs((meta.leftAmountOz ?? 0) - 2.5) < 0.01)
+            #expect(abs((meta.rightAmountOz ?? 0) - 1.5) < 0.01)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.toast?.message == "Pump logged · 4 oz · 18m")
+        #expect(store.eventDetail(for: splitBoth) == "4 oz · 18m · L 2.5 oz (12m), R 1.5 oz (18m)")
+
+        // 3. Single-side volume + duration -> derived side == .left
+        let singleSideVolDur = store.logPump(
+            startedAt: base.addingTimeInterval(120),
+            unit: .oz,
+            leftAmount: 2.5,
+            leftDurationMinutes: 15
+        )
+        if case .pump(let meta) = singleSideVolDur.metadata {
+            #expect(meta.side == .left)
+            #expect(meta.durationMinutes == 15)
+            #expect(meta.leftDurationSeconds == 900)
+            #expect(meta.rightDurationSeconds == nil)
+            #expect(abs((meta.amountOz ?? 0) - 2.5) < 0.01)
+            #expect(abs((meta.leftAmountOz ?? 0) - 2.5) < 0.01)
+            #expect(meta.rightAmountMl == nil)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.eventDetail(for: singleSideVolDur) == "2.5 oz · 15m · Left side")
+
+        // 4. Combined volume + duration -> side == .both, nil per-side amounts
+        let combined = store.logPump(
+            startedAt: base.addingTimeInterval(180),
+            amount: 4,
+            unit: .oz,
+            durationMinutes: 15
+        )
+        if case .pump(let meta) = combined.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.durationMinutes == 15)
+            #expect(meta.leftAmountMl == nil)
+            #expect(meta.rightAmountMl == nil)
+            #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.eventDetail(for: combined) == "4 oz · 15m · Both sides")
+
+        // 5. Time-only single-side -> side == .left, amountMl == nil
+        let timeOnlyLeft = store.logPump(
+            startedAt: base.addingTimeInterval(240),
+            unit: .oz,
+            leftDurationMinutes: 15
+        )
+        if case .pump(let meta) = timeOnlyLeft.metadata {
+            #expect(meta.side == .left)
+            #expect(meta.amountMl == nil)
+            #expect(meta.durationMinutes == 15)
+            #expect(meta.leftDurationSeconds == 900)
+            #expect(meta.rightDurationSeconds == nil)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.eventDetail(for: timeOnlyLeft) == "15m · Left side")
+
+        // 6. Distinct durations only (combined amount) -> "4 oz · 18m · L 12m, R 18m"
+        let combinedStaggeredDur = store.logPump(
+            startedAt: base.addingTimeInterval(300),
+            amount: 4,
+            unit: .oz,
+            leftDurationMinutes: 12,
+            rightDurationMinutes: 18
+        )
+        #expect(store.eventDetail(for: combinedStaggeredDur) == "4 oz · 18m · L 12m, R 18m")
+
+        // 7. Distinct durations only (no volume) + CSV fallback when durationMinutes & endedAt are nil
+        let barePerSideDurEvent = EventDTO(
+            id: UUID(),
+            profileId: store.profile.id,
+            eventType: .pump,
+            startedAt: base.addingTimeInterval(360),
+            endedAt: nil,
+            timezone: store.profile.defaultTimezone,
+            metadata: .pump(
+                PumpMetadata(
+                    amountMl: nil,
+                    displayUnit: .oz,
+                    side: .both,
+                    durationMinutes: nil,
+                    leftDurationSeconds: 720,
+                    rightDurationSeconds: 1080
+                )
+            ),
+            createdBy: store.currentUserId,
+            updatedBy: store.currentUserId
+        )
+        #expect(FormattingHelpers.eventDetail(barePerSideDurEvent, preferredUnit: .oz) == "18m · L 12m, R 18m")
+
+        // 8. mL preferred unit formats per-side amounts cleanly
+        let mlSplit = store.logPump(
+            startedAt: base.addingTimeInterval(420),
+            unit: .ml,
+            durationMinutes: 15,
+            leftAmount: 75,
+            rightAmount: 45
+        )
+        #expect(FormattingHelpers.eventDetail(mlSplit, preferredUnit: .ml) == "120 mL · 15m · L 75 mL, R 45 mL")
+        #expect(store.toast?.message == "Pump logged · 120 mL · 15m")
+
+        // Verify Pediatrician CSV quotes comma-containing pump details & falls back to max(leftSec, rightSec)
+        let csv = DataPortabilityService.exportPediatricianCSV(
+            events: [splitVolSharedDur, splitBoth, combinedStaggeredDur, barePerSideDurEvent],
+            timezone: store.profile.defaultTimezone,
+            preferredUnit: .oz
+        )
+        #expect(csv.contains("\"4 oz · 15m · L 2.5 oz, R 1.5 oz\",15m"))
+        #expect(csv.contains("\"4 oz · 18m · L 2.5 oz (12m), R 1.5 oz (18m)\",18m"))
+        #expect(csv.contains("\"4 oz · 18m · L 12m, R 18m\",18m"))
+        #expect(csv.contains("\"18m · L 12m, R 18m\",18m"))
+    }
+
+    @Test("Manual nursing per-side logging supports Left only, Right only, Both with/without lastSide, and legacy overload")
+    func manualNursingPerSidePermutations() throws {
+        let store = BlythesLifeStore.makeDemo()
+        let base = store.now
+
+        // 1. Left only (L 12m, R 0)
+        let leftOnly = store.logManualNursing(
+            startedAt: base,
+            leftMinutes: 12,
+            rightMinutes: 0
+        )
+        #expect(leftOnly.endedAt == base.addingTimeInterval(12 * 60))
+        #expect(store.toast?.message == "Nursing logged · 12m")
+        if case .feeding(let meta) = leftOnly.metadata {
+            #expect(meta.method == .breast)
+            #expect(meta.side == .left)
+            #expect(meta.lastSide == .left)
+            #expect(meta.durationMinutes == 12)
+            #expect(meta.leftDurationSeconds == 720)
+            #expect(meta.rightDurationSeconds == nil)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: leftOnly) == "12m · Left side")
+
+        // 2. Right only (L 0, R 10m)
+        let rightOnly = store.logManualNursing(
+            startedAt: base.addingTimeInterval(60),
+            leftMinutes: 0,
+            rightMinutes: 10
+        )
+        #expect(rightOnly.endedAt == base.addingTimeInterval(60 + 10 * 60))
+        #expect(store.toast?.message == "Nursing logged · 10m")
+        if case .feeding(let meta) = rightOnly.metadata {
+            #expect(meta.side == .right)
+            #expect(meta.lastSide == .right)
+            #expect(meta.durationMinutes == 10)
+            #expect(meta.leftDurationSeconds == nil)
+            #expect(meta.rightDurationSeconds == 600)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: rightOnly) == "10m · Right side")
+
+        // 3. Both sides (L 10m, R 8m, lastSide: .right)
+        let bothWithLast = store.logManualNursing(
+            startedAt: base.addingTimeInterval(120),
+            leftMinutes: 10,
+            rightMinutes: 8,
+            lastSide: .right,
+            notes: "Calm evening feed"
+        )
+        #expect(bothWithLast.endedAt == base.addingTimeInterval(120 + 18 * 60))
+        #expect(store.toast?.message == "Nursing logged · 18m")
+        if case .feeding(let meta) = bothWithLast.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.lastSide == .right)
+            #expect(meta.durationMinutes == 18)
+            #expect(meta.leftDurationSeconds == 600)
+            #expect(meta.rightDurationSeconds == 480)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: bothWithLast) == "18m · Left 10m, Right 8m · Ended right")
+        #expect(store.lastNursingSideInfo?.side == .right)
+
+        // 4. Both sides without lastSide (or invalid .both lastSide) resolves lastSide to nil
+        let bothWithoutLast = store.logManualNursing(
+            startedAt: base.addingTimeInterval(240),
+            leftMinutes: 9,
+            rightMinutes: 7,
+            lastSide: .both
+        )
+        if case .feeding(let meta) = bothWithoutLast.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.lastSide == nil)
+            #expect(meta.durationMinutes == 16)
+            #expect(meta.leftDurationSeconds == 540)
+            #expect(meta.rightDurationSeconds == 420)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: bothWithoutLast) == "16m · Left 9m, Right 7m")
+
+        // 5. Legacy single-duration overload populates leftDurationSeconds/rightDurationSeconds for single sides
+        let legacyLeft = store.logManualNursing(
+            startedAt: base.addingTimeInterval(300),
+            minutes: 11,
+            side: .left
+        )
+        if case .feeding(let meta) = legacyLeft.metadata {
+            #expect(meta.leftDurationSeconds == 660)
+            #expect(meta.rightDurationSeconds == nil)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        let legacyRight = store.logManualNursing(
+            startedAt: base.addingTimeInterval(360),
+            minutes: 9,
+            side: .right
+        )
+        if case .feeding(let meta) = legacyRight.metadata {
+            #expect(meta.leftDurationSeconds == nil)
+            #expect(meta.rightDurationSeconds == 540)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
     }
 
     @Test("activePump is cleared on sign-out, account deletion, expired session, demo preview transitions, and household switch")
@@ -3821,7 +4319,7 @@ struct PortabilityAndInfrastructureTests {
         #expect(decoded.household.id == seed.household.id)
     }
 
-    @Test("Legacy PersistedAppState missing activePumpSession and ActiveNursingSession missing lastActiveSide decode cleanly")
+    @Test("Legacy PersistedAppState missing activePumpSession, ActiveNursingSession missing lastActiveSide, and Build 3 ActivePumpSession JSON migrate cleanly")
     func legacyActiveSessionBackwardCompatibleDecode() throws {
         var seed = SampleSeedData.makeDemoState()
         let startedAt = makeDate(hour: 12, minute: 0)
@@ -3835,10 +4333,12 @@ struct PortabilityAndInfrastructureTests {
         )
         seed.activePumpSession = ActivePumpSession(
             startedAt: startedAt,
-            accumulatedSeconds: 420,
-            isRunning: false,
-            activeSegmentStartedAt: nil,
-            side: .left
+            leftAccumulatedSeconds: 420,
+            rightAccumulatedSeconds: 300,
+            leftSegmentStartedAt: nil,
+            rightSegmentStartedAt: startedAt.addingTimeInterval(420),
+            sessionAccumulatedSeconds: 420,
+            sessionSegmentStartedAt: startedAt.addingTimeInterval(420)
         )
 
         let encoded = try BlythesLifeJSONCoding.makeEncoder().encode(seed)
@@ -3861,6 +4361,76 @@ struct PortabilityAndInfrastructureTests {
         #expect(decodedNursing.rightAccumulatedSeconds == 60)
         #expect(decodedNursing.activeSide == .right)
         #expect(decodedNursing.lastActiveSide == nil)
+
+        // Legacy Build 3 ActivePumpSession JSON migration: paused left
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let startedISO = formatter.string(from: startedAt)
+        let segISO = formatter.string(from: startedAt.addingTimeInterval(300))
+
+        let legacyPausedLeftJSON = """
+        {
+          "startedAt": "\(startedISO)",
+          "accumulatedSeconds": 420,
+          "isRunning": false,
+          "side": "left"
+        }
+        """
+        let migratedLeft = try BlythesLifeJSONCoding.makeDecoder().decode(
+            ActivePumpSession.self,
+            from: Data(legacyPausedLeftJSON.utf8)
+        )
+        #expect(migratedLeft.startedAt == startedAt)
+        #expect(migratedLeft.leftAccumulatedSeconds == 420)
+        #expect(migratedLeft.rightAccumulatedSeconds == 0)
+        #expect(migratedLeft.sessionAccumulatedSeconds == 420)
+        #expect(migratedLeft.isRunning == false)
+        #expect(migratedLeft.derivedSide(asOf: startedAt.addingTimeInterval(500)) == .left)
+        #expect(migratedLeft.elapsedSeconds(asOf: startedAt.addingTimeInterval(500)) == (420, 0, 420))
+
+        // Legacy Build 3 ActivePumpSession JSON migration: running both with activeSegmentStartedAt
+        let legacyRunningBothJSON = """
+        {
+          "startedAt": "\(startedISO)",
+          "accumulatedSeconds": 180,
+          "isRunning": true,
+          "activeSegmentStartedAt": "\(segISO)",
+          "side": "both"
+        }
+        """
+        let migratedBoth = try BlythesLifeJSONCoding.makeDecoder().decode(
+            ActivePumpSession.self,
+            from: Data(legacyRunningBothJSON.utf8)
+        )
+        #expect(migratedBoth.isRunning == true)
+        #expect(migratedBoth.isBothRunning == true)
+        #expect(migratedBoth.leftAccumulatedSeconds == 180)
+        #expect(migratedBoth.rightAccumulatedSeconds == 180)
+        #expect(migratedBoth.sessionAccumulatedSeconds == 180)
+        #expect(migratedBoth.leftSegmentStartedAt == startedAt.addingTimeInterval(300))
+        #expect(migratedBoth.rightSegmentStartedAt == startedAt.addingTimeInterval(300))
+        #expect(migratedBoth.sessionSegmentStartedAt == startedAt.addingTimeInterval(300))
+        #expect(migratedBoth.elapsedSeconds(asOf: startedAt.addingTimeInterval(420)) == (300, 300, 300))
+
+        // Legacy Build 3 ActivePumpSession JSON migration: running right without activeSegmentStartedAt falls back to startedAt
+        let legacyRunningRightJSON = """
+        {
+          "startedAt": "\(startedISO)",
+          "accumulatedSeconds": 0,
+          "isRunning": true,
+          "side": "right"
+        }
+        """
+        let migratedRight = try BlythesLifeJSONCoding.makeDecoder().decode(
+            ActivePumpSession.self,
+            from: Data(legacyRunningRightJSON.utf8)
+        )
+        #expect(migratedRight.isLeftRunning == false)
+        #expect(migratedRight.isRightRunning == true)
+        #expect(migratedRight.rightSegmentStartedAt == startedAt)
+        #expect(migratedRight.sessionSegmentStartedAt == startedAt)
+        #expect(migratedRight.derivedSide(asOf: startedAt.addingTimeInterval(60)) == .right)
+        #expect(migratedRight.elapsedSeconds(asOf: startedAt.addingTimeInterval(60)) == (0, 60, 60))
     }
 
     @Test("SyncSSEParser parses single-line and multi-line SSE notifications while ignoring keepalives")

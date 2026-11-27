@@ -873,6 +873,166 @@ private struct BLNursingSideStyle: ButtonStyle {
     }
 }
 
+// MARK: - BLPumpTimer
+
+/// Live independent dual-side pump timer with giant `mm:ss` union session total, two `112pt` Left/Right side cards, and a full-width start/pause control.
+public struct BLPumpTimer: View {
+    @Environment(\.blTheme) private var theme
+
+    private let sessionSeconds: Int
+    private let leftSeconds: Int
+    private let rightSeconds: Int
+    private let isLeftRunning: Bool
+    private let isRightRunning: Bool
+    private let onTapSide: (String) -> Void
+    private let onToggleBoth: () -> Void
+
+    public init(
+        sessionSeconds: Int,
+        leftSeconds: Int,
+        rightSeconds: Int,
+        isLeftRunning: Bool,
+        isRightRunning: Bool,
+        onTapSide: @escaping (String) -> Void,
+        onToggleBoth: @escaping () -> Void
+    ) {
+        self.sessionSeconds = sessionSeconds
+        self.leftSeconds = leftSeconds
+        self.rightSeconds = rightSeconds
+        self.isLeftRunning = isLeftRunning
+        self.isRightRunning = isRightRunning
+        self.onTapSide = onTapSide
+        self.onToggleBoth = onToggleBoth
+    }
+
+    public var body: some View {
+        VStack(spacing: 14) {
+            Text(Self.formatMMSS(sessionSeconds))
+                .blTextRole(.timer)
+                .foregroundStyle(theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            VStack(spacing: BLSpacing.space3) {
+                HStack(spacing: BLSpacing.space2) {
+                    sideCard(id: "left", label: "Left", seconds: leftSeconds, isRunning: isLeftRunning)
+                    sideCard(id: "right", label: "Right", seconds: rightSeconds, isRunning: isRightRunning)
+                }
+
+                toggleBothButton
+            }
+        }
+    }
+
+    private var toggleBothButton: some View {
+        let isAnyRunning = isLeftRunning || isRightRunning
+        let isBothRunning = isLeftRunning && isRightRunning
+        let title: String = {
+            if isBothRunning { return "Pause both" }
+            if isAnyRunning { return "Pause" }
+            if sessionSeconds > 0 { return "Resume both" }
+            return "Start both"
+        }()
+
+        return BLButton(
+            title,
+            variant: isAnyRunning ? .secondary : .primary,
+            size: .md,
+            isBlock: true,
+            icon: isAnyRunning ? BLSymbol.pause : BLSymbol.play,
+            action: onToggleBoth
+        )
+    }
+
+    private func sideCard(id: String, label: String, seconds: Int, isRunning: Bool) -> some View {
+        let pumpColors = theme.event(.pump)
+        let stateText: String = {
+            if isRunning { return "Pause" }
+            if seconds > 0 { return "Resume" }
+            return "Start"
+        }()
+
+        return Button {
+            onTapSide(id)
+        } label: {
+            VStack(alignment: .leading, spacing: BLSpacing.space1) {
+                HStack(spacing: BLSpacing.space2) {
+                    Text(label)
+                        .blMicroLabel()
+                    Spacer(minLength: 4)
+                }
+                .frame(minHeight: 22)
+
+                Text(Self.formatMMSS(seconds))
+                    .blTextRole(.display)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+
+                Spacer(minLength: BLSpacing.space2)
+
+                HStack(spacing: 6) {
+                    Image(systemName: isRunning ? BLSymbol.pause : BLSymbol.play)
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(stateText)
+                        .font(BLFont.ui(size: 15, weight: .semibold))
+                }
+                .foregroundStyle(isRunning ? pumpColors.ink : theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
+            .padding(14)
+        }
+        .buttonStyle(BLPumpSideStyle(isRunning: isRunning))
+        .accessibilityAddTraits(isRunning ? .isSelected : [])
+    }
+
+    private static func formatMMSS(_ seconds: Int) -> String {
+        let clamped = max(0, seconds)
+        let mins = clamped / 60
+        let secs = clamped % 60
+        return "\(mins):" + (secs < 10 ? "0\(secs)" : "\(secs)")
+    }
+}
+
+private struct BLPumpSideStyle: ButtonStyle {
+    let isRunning: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        StyledBody(configuration: configuration, isRunning: isRunning)
+    }
+
+    private struct StyledBody: View {
+        @Environment(\.blTheme) private var theme
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        let configuration: Configuration
+        let isRunning: Bool
+
+        var body: some View {
+            let pumpColors = theme.event(.pump)
+            let shape = RoundedRectangle(cornerRadius: BLRadius.lg, style: .continuous)
+            configuration.label
+                .background(
+                    shape.fill(isRunning ? pumpColors.tint : theme.bgSurface)
+                )
+                .overlay(
+                    shape.strokeBorder(
+                        isRunning ? pumpColors.solid : theme.borderStrong,
+                        lineWidth: isRunning ? 2 : BLSpacing.borderWidth
+                    )
+                )
+                .contentShape(shape)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+                .animation(
+                    BLMotion.easeOut(duration: BLMotion.fast, reducedMotion: reduceMotion),
+                    value: configuration.isPressed
+                )
+                .animation(
+                    BLMotion.easeOut(duration: BLMotion.fast, reducedMotion: reduceMotion),
+                    value: isRunning
+                )
+        }
+    }
+}
+
 // MARK: - BLDraftCard
 
 /// Paper-log scan review entry card with include checkbox, selection outline, and amber ambiguity resolution bar.

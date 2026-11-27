@@ -151,30 +151,76 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
     }
 }
 
-/// Active pumping timer persisted across app launches.
+/// Active independent dual-side pumping timer persisted across app launches.
+/// Tracks left, right, and union-of-active-intervals session elapsed durations independently.
 public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
     public var startedAt: Date
-    public var accumulatedSeconds: Double
-    public var isRunning: Bool
-    public var activeSegmentStartedAt: Date?
-    public var side: BreastSide
+    public var leftAccumulatedSeconds: TimeInterval
+    public var rightAccumulatedSeconds: TimeInterval
+    public var leftSegmentStartedAt: Date?
+    public var rightSegmentStartedAt: Date?
+    public var sessionAccumulatedSeconds: TimeInterval
+    public var sessionSegmentStartedAt: Date?
 
     public init(
         startedAt: Date,
-        accumulatedSeconds: Double = 0,
-        isRunning: Bool = true,
-        activeSegmentStartedAt: Date? = nil,
-        side: BreastSide = .both
+        leftAccumulatedSeconds: TimeInterval = 0,
+        rightAccumulatedSeconds: TimeInterval = 0,
+        leftSegmentStartedAt: Date? = nil,
+        rightSegmentStartedAt: Date? = nil,
+        sessionAccumulatedSeconds: TimeInterval = 0,
+        sessionSegmentStartedAt: Date? = nil
     ) {
         self.startedAt = startedAt
-        self.accumulatedSeconds = accumulatedSeconds
-        self.isRunning = isRunning
-        self.activeSegmentStartedAt = activeSegmentStartedAt
-        self.side = side
+        self.leftAccumulatedSeconds = leftAccumulatedSeconds
+        self.rightAccumulatedSeconds = rightAccumulatedSeconds
+        self.leftSegmentStartedAt = leftSegmentStartedAt
+        self.rightSegmentStartedAt = rightSegmentStartedAt
+        self.sessionAccumulatedSeconds = sessionAccumulatedSeconds
+        self.sessionSegmentStartedAt = sessionSegmentStartedAt
+    }
+
+    public var isLeftRunning: Bool { leftSegmentStartedAt != nil }
+    public var isRightRunning: Bool { rightSegmentStartedAt != nil }
+    public var isRunning: Bool { isLeftRunning || isRightRunning }
+    public var isBothRunning: Bool { isLeftRunning && isRightRunning }
+
+    /// Computes live elapsed seconds for left, right, and union-of-active-intervals session as of `now`.
+    public func elapsedSeconds(asOf now: Date) -> (left: TimeInterval, right: TimeInterval, session: TimeInterval) {
+        let left = leftAccumulatedSeconds + (leftSegmentStartedAt.map { max(0, now.timeIntervalSince($0)) } ?? 0)
+        let right = rightAccumulatedSeconds + (rightSegmentStartedAt.map { max(0, now.timeIntervalSince($0)) } ?? 0)
+        let session = sessionAccumulatedSeconds + (sessionSegmentStartedAt.map { max(0, now.timeIntervalSince($0)) } ?? 0)
+        return (left, right, session)
+    }
+
+    /// Derives the canonical breast side from accumulated or currently running sides.
+    public func derivedSide(asOf now: Date) -> BreastSide {
+        let elapsed = elapsedSeconds(asOf: now)
+        let hasLeft = elapsed.left > 0 || isLeftRunning
+        let hasRight = elapsed.right > 0 || isRightRunning
+        if hasLeft && hasRight {
+            return .both
+        }
+        if hasLeft {
+            return .left
+        }
+        if hasRight {
+            return .right
+        }
+        return .both
     }
 
     private enum CodingKeys: String, CodingKey {
         case startedAt
+        case leftAccumulatedSeconds
+        case rightAccumulatedSeconds
+        case leftSegmentStartedAt
+        case rightSegmentStartedAt
+        case sessionAccumulatedSeconds
+        case sessionSegmentStartedAt
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
         case accumulatedSeconds
         case isRunning
         case activeSegmentStartedAt
@@ -183,16 +229,49 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.startedAt = try container.decode(Date.self, forKey: .startedAt)
-        self.accumulatedSeconds = try container.decodeIfPresent(Double.self, forKey: .accumulatedSeconds) ?? 0
-        self.isRunning = try container.decodeIfPresent(Bool.self, forKey: .isRunning) ?? false
-        self.activeSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .activeSegmentStartedAt)
-        self.side = try container.decodeIfPresent(BreastSide.self, forKey: .side) ?? .both
+        let startedAt = try container.decode(Date.self, forKey: .startedAt)
+        self.startedAt = startedAt
+
+        let hasNewKeys = container.contains(.leftAccumulatedSeconds)
+            || container.contains(.rightAccumulatedSeconds)
+            || container.contains(.sessionAccumulatedSeconds)
+            || container.contains(.leftSegmentStartedAt)
+            || container.contains(.rightSegmentStartedAt)
+            || container.contains(.sessionSegmentStartedAt)
+
+        if hasNewKeys {
+            self.leftAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .leftAccumulatedSeconds) ?? 0
+            self.rightAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .rightAccumulatedSeconds) ?? 0
+            self.leftSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .leftSegmentStartedAt)
+            self.rightSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .rightSegmentStartedAt)
+            self.sessionAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .sessionAccumulatedSeconds) ?? 0
+            self.sessionSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .sessionSegmentStartedAt)
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            let oldAccum = try legacy.decodeIfPresent(TimeInterval.self, forKey: .accumulatedSeconds) ?? 0
+            let oldIsRunning = try legacy.decodeIfPresent(Bool.self, forKey: .isRunning) ?? false
+            let oldActiveSeg = try legacy.decodeIfPresent(Date.self, forKey: .activeSegmentStartedAt)
+            let oldSide = try legacy.decodeIfPresent(BreastSide.self, forKey: .side) ?? .both
+            let oldSeg: Date? = oldIsRunning ? (oldActiveSeg ?? startedAt) : nil
+
+            self.sessionAccumulatedSeconds = oldAccum
+            self.sessionSegmentStartedAt = oldSeg
+            self.leftAccumulatedSeconds = (oldSide == .left || oldSide == .both) ? oldAccum : 0
+            self.rightAccumulatedSeconds = (oldSide == .right || oldSide == .both) ? oldAccum : 0
+            self.leftSegmentStartedAt = (oldSide == .left || oldSide == .both) ? oldSeg : nil
+            self.rightSegmentStartedAt = (oldSide == .right || oldSide == .both) ? oldSeg : nil
+        }
     }
 
-    /// Computes live elapsed seconds as of `now`.
-    public func elapsedSeconds(asOf now: Date) -> Double {
-        accumulatedSeconds + (isRunning ? max(0, now.timeIntervalSince(activeSegmentStartedAt ?? startedAt)) : 0)
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(startedAt, forKey: .startedAt)
+        try container.encode(leftAccumulatedSeconds, forKey: .leftAccumulatedSeconds)
+        try container.encode(rightAccumulatedSeconds, forKey: .rightAccumulatedSeconds)
+        try container.encodeIfPresent(leftSegmentStartedAt, forKey: .leftSegmentStartedAt)
+        try container.encodeIfPresent(rightSegmentStartedAt, forKey: .rightSegmentStartedAt)
+        try container.encode(sessionAccumulatedSeconds, forKey: .sessionAccumulatedSeconds)
+        try container.encodeIfPresent(sessionSegmentStartedAt, forKey: .sessionSegmentStartedAt)
     }
 }
 

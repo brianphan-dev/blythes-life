@@ -350,13 +350,21 @@ public enum FormattingHelpers: Sendable {
 
         case .pump(let meta):
             var parts: [String] = []
+            let leftSec = meta.leftDurationSeconds ?? 0
+            let rightSec = meta.rightDurationSeconds ?? 0
             let durationMins: Double? = {
                 if let explicit = meta.durationMinutes, explicit > 0 {
                     return explicit
                 }
                 if let endedAt = event.endedAt {
                     let wall = endedAt.timeIntervalSince(event.startedAt) / 60.0
-                    return wall > 0 ? wall : nil
+                    if wall > 0 {
+                        return wall
+                    }
+                }
+                let maxSideSec = max(leftSec, rightSec)
+                if maxSideSec > 0 {
+                    return Double(maxSideSec) / 60.0
                 }
                 return nil
             }()
@@ -372,7 +380,33 @@ public enum FormattingHelpers: Sendable {
                 parts.append("\(max(1, Int(mins.rounded())))m")
             }
 
-            parts.append(formatSide(meta.side))
+            let hasSplitAmounts = (meta.leftAmountMl ?? 0) > 0 && (meta.rightAmountMl ?? 0) > 0
+            let leftMin = leftSec > 0 ? max(1, Int((Double(leftSec) / 60.0).rounded())) : nil
+            let rightMin = rightSec > 0 ? max(1, Int((Double(rightSec) / 60.0).rounded())) : nil
+            let hasDistinctBothDurations: Bool = {
+                guard let leftMin, let rightMin else { return false }
+                return leftMin != rightMin
+            }()
+
+            if meta.side == .both && (hasSplitAmounts || hasDistinctBothDurations) {
+                if hasSplitAmounts, let leftAmountMl = meta.leftAmountMl, let rightAmountMl = meta.rightAmountMl {
+                    let leftValue = preferredUnit == .oz ? UnitConversion.mlToOz(leftAmountMl) : leftAmountMl
+                    let rightValue = preferredUnit == .oz ? UnitConversion.mlToOz(rightAmountMl) : rightAmountMl
+                    let leftAmt = formatAmount(leftValue, unit: preferredUnit)
+                    let rightAmt = formatAmount(rightValue, unit: preferredUnit)
+                    if hasDistinctBothDurations, let leftMin, let rightMin {
+                        parts.append("L \(leftAmt) (\(leftMin)m), R \(rightAmt) (\(rightMin)m)")
+                    } else {
+                        parts.append("L \(leftAmt), R \(rightAmt)")
+                    }
+                } else if hasDistinctBothDurations, let leftMin, let rightMin {
+                    parts.append("L \(leftMin)m, R \(rightMin)m")
+                } else {
+                    parts.append(formatSide(meta.side))
+                }
+            } else {
+                parts.append(formatSide(meta.side))
+            }
             return parts.joined(separator: " · ")
 
         case .diaper(let meta):

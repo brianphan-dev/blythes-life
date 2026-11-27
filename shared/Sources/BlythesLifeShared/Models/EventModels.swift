@@ -205,32 +205,60 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
     public var displayUnit: VolumeUnit
     public var side: BreastSide
     public var durationMinutes: Double?
+    public var leftAmountMl: Double?
+    public var rightAmountMl: Double?
+    public var leftDurationSeconds: Int?
+    public var rightDurationSeconds: Int?
 
     public init(
         amountMl: Double? = nil,
         displayUnit: VolumeUnit = .oz,
         side: BreastSide = .both,
-        durationMinutes: Double? = nil
+        durationMinutes: Double? = nil,
+        leftAmountMl: Double? = nil,
+        rightAmountMl: Double? = nil,
+        leftDurationSeconds: Int? = nil,
+        rightDurationSeconds: Int? = nil
     ) {
         self.amountMl = amountMl
         self.displayUnit = displayUnit
         self.side = side
         self.durationMinutes = durationMinutes
+        self.leftAmountMl = leftAmountMl
+        self.rightAmountMl = rightAmountMl
+        self.leftDurationSeconds = leftDurationSeconds
+        self.rightDurationSeconds = rightDurationSeconds
     }
 
     public init(
         amountOz: Double,
         side: BreastSide = .both,
-        durationMinutes: Double? = nil
+        durationMinutes: Double? = nil,
+        leftAmountOz: Double? = nil,
+        rightAmountOz: Double? = nil,
+        leftDurationSeconds: Int? = nil,
+        rightDurationSeconds: Int? = nil
     ) {
         self.amountMl = UnitConversion.ozToMl(amountOz)
         self.displayUnit = .oz
         self.side = side
         self.durationMinutes = durationMinutes
+        self.leftAmountMl = leftAmountOz.map(UnitConversion.ozToMl)
+        self.rightAmountMl = rightAmountOz.map(UnitConversion.ozToMl)
+        self.leftDurationSeconds = leftDurationSeconds
+        self.rightDurationSeconds = rightDurationSeconds
     }
 
     public var amountOz: Double? {
         amountMl.map(UnitConversion.mlToOz)
+    }
+
+    public var leftAmountOz: Double? {
+        leftAmountMl.map(UnitConversion.mlToOz)
+    }
+
+    public var rightAmountOz: Double? {
+        rightAmountMl.map(UnitConversion.mlToOz)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -238,6 +266,10 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         case displayUnit = "display_unit"
         case side
         case durationMinutes = "duration_minutes"
+        case leftAmountMl = "left_amount_ml"
+        case rightAmountMl = "right_amount_ml"
+        case leftDurationSeconds = "left_duration_seconds"
+        case rightDurationSeconds = "right_duration_seconds"
     }
 
     public init(from decoder: Decoder) throws {
@@ -246,6 +278,10 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         self.displayUnit = try container.decodeIfPresent(VolumeUnit.self, forKey: .displayUnit) ?? .oz
         self.side = try container.decodeIfPresent(BreastSide.self, forKey: .side) ?? .both
         self.durationMinutes = try container.decodeIfPresent(Double.self, forKey: .durationMinutes)
+        self.leftAmountMl = try container.decodeIfPresent(Double.self, forKey: .leftAmountMl)
+        self.rightAmountMl = try container.decodeIfPresent(Double.self, forKey: .rightAmountMl)
+        self.leftDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .leftDurationSeconds)
+        self.rightDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .rightDurationSeconds)
     }
 }
 
@@ -378,6 +414,8 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
         case side
         case lastSide = "last_side"
         case amountMl = "amount_ml"
+        case leftAmountMl = "left_amount_ml"
+        case rightAmountMl = "right_amount_ml"
         case displayUnit = "display_unit"
         case peeSize = "pee_size"
         case poopSize = "poop_size"
@@ -398,7 +436,7 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
             self = .sleep(try SleepMetadata(from: decoder))
         } else if container.contains(.method) || container.contains(.substance) || container.contains(.lastSide) {
             self = .feeding(try FeedingMetadata(from: decoder))
-        } else if container.contains(.side) {
+        } else if container.contains(.side) || container.contains(.leftAmountMl) || container.contains(.rightAmountMl) {
             self = .pump(try PumpMetadata(from: decoder))
         } else if container.contains(.amountMl) || container.contains(.displayUnit) {
             self = .feeding(try FeedingMetadata(from: decoder))

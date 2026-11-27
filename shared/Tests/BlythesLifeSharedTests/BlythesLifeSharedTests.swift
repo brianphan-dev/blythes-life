@@ -1135,6 +1135,212 @@ struct ModelCodingTests {
         #expect(decodedLegacy.side == .left)
         #expect(decodedLegacy.durationMinutes == nil)
     }
+
+    @Test("PumpMetadata per-side volumes and durations round-trip with snake_case JSON and oz conversions")
+    func pumpMetadataPerSideFieldsRoundTripAndOzConversions() throws {
+        let pump = PumpMetadata(
+            amountMl: 133.1,
+            displayUnit: .oz,
+            side: .both,
+            durationMinutes: 15,
+            leftAmountMl: 59.1,
+            rightAmountMl: 73.9,
+            leftDurationSeconds: 420,
+            rightDurationSeconds: 480
+        )
+
+        #expect(pump.amountOz == 4.5)
+        #expect(pump.leftAmountOz == 2.0)
+        #expect(pump.rightAmountOz == 2.5)
+
+        let data = try encoder.encode(pump)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"amount_ml\":133.1"))
+        #expect(json.contains("\"display_unit\":\"oz\""))
+        #expect(json.contains("\"side\":\"both\""))
+        #expect(json.contains("\"duration_minutes\":15"))
+        #expect(json.contains("\"left_amount_ml\":59.1"))
+        #expect(json.contains("\"right_amount_ml\":73.9"))
+        #expect(json.contains("\"left_duration_seconds\":420"))
+        #expect(json.contains("\"right_duration_seconds\":480"))
+
+        let decoded = try decoder.decode(PumpMetadata.self, from: data)
+        #expect(decoded == pump)
+        #expect(decoded.leftAmountMl == 59.1)
+        #expect(decoded.rightAmountMl == 73.9)
+        #expect(decoded.leftAmountOz == 2.0)
+        #expect(decoded.rightAmountOz == 2.5)
+        #expect(decoded.leftDurationSeconds == 420)
+        #expect(decoded.rightDurationSeconds == 480)
+
+        // Convenience amountOz initializer supports optional per-side oz volumes & durations.
+        let ozPump = PumpMetadata(
+            amountOz: 4.5,
+            side: .both,
+            durationMinutes: 15,
+            leftAmountOz: 2.0,
+            rightAmountOz: 2.5,
+            leftDurationSeconds: 420,
+            rightDurationSeconds: 480
+        )
+        #expect(ozPump == pump)
+        #expect(ozPump.leftAmountMl == 59.1)
+        #expect(ozPump.rightAmountMl == 73.9)
+        #expect(ozPump.leftAmountOz == 2.0)
+        #expect(ozPump.rightAmountOz == 2.5)
+
+        // Full EventDTO round-trip preserves per-side pump metadata fields.
+        let now = fixedDate("2026-11-27T18:00:00.000Z")
+        let userId = UUID()
+        let event = EventDTO(
+            profileId: UUID(),
+            eventType: .pump,
+            startedAt: now,
+            endedAt: now.addingTimeInterval(900),
+            timezone: "America/Los_Angeles",
+            metadata: .pump(pump),
+            source: .manual,
+            createdBy: userId,
+            updatedBy: userId,
+            createdAt: now,
+            updatedAt: now
+        )
+        let eventData = try encoder.encode(event)
+        let decodedEvent = try decoder.decode(EventDTO.self, from: eventData)
+        #expect(decodedEvent == event)
+        #expect(decodedEvent.metadata == .pump(pump))
+    }
+
+    @Test("Legacy PumpMetadata JSON omitting per-side keys decodes cleanly with nil defaults")
+    func pumpMetadataLegacyJSONBackwardCompatibility() throws {
+        let legacyWithDurationJSON = Data(
+            #"{"amount_ml":133.1,"display_unit":"oz","side":"both","duration_minutes":18}"#.utf8
+        )
+        let decodedWithDuration = try decoder.decode(PumpMetadata.self, from: legacyWithDurationJSON)
+        #expect(decodedWithDuration.amountMl == 133.1)
+        #expect(decodedWithDuration.amountOz == 4.5)
+        #expect(decodedWithDuration.displayUnit == .oz)
+        #expect(decodedWithDuration.side == .both)
+        #expect(decodedWithDuration.durationMinutes == 18)
+        #expect(decodedWithDuration.leftAmountMl == nil)
+        #expect(decodedWithDuration.rightAmountMl == nil)
+        #expect(decodedWithDuration.leftAmountOz == nil)
+        #expect(decodedWithDuration.rightAmountOz == nil)
+        #expect(decodedWithDuration.leftDurationSeconds == nil)
+        #expect(decodedWithDuration.rightDurationSeconds == nil)
+
+        let legacyMinimalJSON = Data(#"{"amount_ml":90,"display_unit":"ml","side":"right"}"#.utf8)
+        let decodedMinimal = try decoder.decode(PumpMetadata.self, from: legacyMinimalJSON)
+        #expect(decodedMinimal.amountMl == 90)
+        #expect(decodedMinimal.displayUnit == .ml)
+        #expect(decodedMinimal.side == .right)
+        #expect(decodedMinimal.durationMinutes == nil)
+        #expect(decodedMinimal.leftAmountMl == nil)
+        #expect(decodedMinimal.rightAmountMl == nil)
+        #expect(decodedMinimal.leftDurationSeconds == nil)
+        #expect(decodedMinimal.rightDurationSeconds == nil)
+
+        // Encoding without per-side fields omits the 4 optional keys.
+        let legacyPump = PumpMetadata(amountOz: 4.5, side: .both, durationMinutes: 15)
+        #expect(legacyPump.leftAmountMl == nil)
+        #expect(legacyPump.rightAmountMl == nil)
+        #expect(legacyPump.leftAmountOz == nil)
+        #expect(legacyPump.rightAmountOz == nil)
+        #expect(legacyPump.leftDurationSeconds == nil)
+        #expect(legacyPump.rightDurationSeconds == nil)
+
+        let encodedLegacyData = try encoder.encode(legacyPump)
+        let encodedLegacyJSON = try #require(String(data: encodedLegacyData, encoding: .utf8))
+        #expect(!encodedLegacyJSON.contains("\"left_amount_ml\""))
+        #expect(!encodedLegacyJSON.contains("\"right_amount_ml\""))
+        #expect(!encodedLegacyJSON.contains("\"left_duration_seconds\""))
+        #expect(!encodedLegacyJSON.contains("\"right_duration_seconds\""))
+    }
+
+    @Test("Standalone EventMetadata discriminates left_amount_ml / right_amount_ml as .pump without routing duration-only payloads to .pump")
+    func standaloneEventMetadataDiscriminatesPumpPerSideAmounts() throws {
+        // left_amount_ml alone (without side) routes to .pump
+        let leftOnlyJSON = Data(#"{"left_amount_ml":59.1}"#.utf8)
+        let leftOnly = try decoder.decode(EventMetadata.self, from: leftOnlyJSON)
+        #expect(
+            leftOnly == .pump(
+                PumpMetadata(
+                    amountMl: nil,
+                    displayUnit: .oz,
+                    side: .both,
+                    durationMinutes: nil,
+                    leftAmountMl: 59.1,
+                    rightAmountMl: nil,
+                    leftDurationSeconds: nil,
+                    rightDurationSeconds: nil
+                )
+            )
+        )
+
+        // right_amount_ml alone (without side) routes to .pump
+        let rightOnlyJSON = Data(#"{"right_amount_ml":73.9}"#.utf8)
+        let rightOnly = try decoder.decode(EventMetadata.self, from: rightOnlyJSON)
+        #expect(
+            rightOnly == .pump(
+                PumpMetadata(
+                    amountMl: nil,
+                    displayUnit: .oz,
+                    side: .both,
+                    durationMinutes: nil,
+                    leftAmountMl: nil,
+                    rightAmountMl: 73.9,
+                    leftDurationSeconds: nil,
+                    rightDurationSeconds: nil
+                )
+            )
+        )
+
+        // Combined per-side volumes & durations with amount_ml/display_unit (still omitting side) routes to .pump
+        let combinedWithoutSideJSON = Data(
+            #"{"amount_ml":133.1,"display_unit":"oz","left_amount_ml":59.1,"right_amount_ml":73.9,"left_duration_seconds":420,"right_duration_seconds":480}"#.utf8
+        )
+        let combinedWithoutSide = try decoder.decode(EventMetadata.self, from: combinedWithoutSideJSON)
+        #expect(
+            combinedWithoutSide == .pump(
+                PumpMetadata(
+                    amountMl: 133.1,
+                    displayUnit: .oz,
+                    side: .both,
+                    durationMinutes: nil,
+                    leftAmountMl: 59.1,
+                    rightAmountMl: 73.9,
+                    leftDurationSeconds: 420,
+                    rightDurationSeconds: 480
+                )
+            )
+        )
+
+        // left_duration_seconds / right_duration_seconds alone must NOT route to .pump (shared with FeedingMetadata)
+        let durationsOnlyJSON = Data(#"{"left_duration_seconds":300,"right_duration_seconds":360}"#.utf8)
+        let durationsOnly = try decoder.decode(EventMetadata.self, from: durationsOnlyJSON)
+        #expect(durationsOnly == .note(NoteMetadata()))
+
+        // Feeding payloads with left_duration_seconds / right_duration_seconds still decode as .feeding
+        let nursingJSON = Data(
+            #"{"method":"breast","substance":"breast_milk","display_unit":"oz","side":"both","left_duration_seconds":300,"right_duration_seconds":360}"#.utf8
+        )
+        let nursing = try decoder.decode(EventMetadata.self, from: nursingJSON)
+        #expect(
+            nursing == .feeding(
+                FeedingMetadata(
+                    method: .breast,
+                    substance: .breastMilk,
+                    amountMl: nil,
+                    displayUnit: .oz,
+                    side: .both,
+                    durationMinutes: nil,
+                    leftDurationSeconds: 300,
+                    rightDurationSeconds: 360,
+                    lastSide: nil
+                )
+            )
+        )
+    }
 }
 
 @Suite("UnitConversion")

@@ -123,19 +123,22 @@ public struct AuthSessionResponse: Codable, Sendable, Equatable, Hashable {
     public var refreshToken: String
     public var user: UserDTO
     public var households: [HouseholdDTO]
+    public var pendingJoinRequests: [HouseholdJoinRequestDTO]?
 
     public init(
         accessToken: String,
         expiresIn: Int,
         refreshToken: String,
         user: UserDTO,
-        households: [HouseholdDTO]
+        households: [HouseholdDTO],
+        pendingJoinRequests: [HouseholdJoinRequestDTO]? = nil
     ) {
         self.accessToken = accessToken
         self.expiresIn = expiresIn
         self.refreshToken = refreshToken
         self.user = user
         self.households = households
+        self.pendingJoinRequests = pendingJoinRequests
     }
 
     enum CodingKeys: String, CodingKey {
@@ -144,6 +147,20 @@ public struct AuthSessionResponse: Codable, Sendable, Equatable, Hashable {
         case refreshToken = "refresh_token"
         case user
         case households
+        case pendingJoinRequests = "pending_join_requests"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.accessToken = try container.decode(String.self, forKey: .accessToken)
+        self.expiresIn = try container.decode(Int.self, forKey: .expiresIn)
+        self.refreshToken = try container.decode(String.self, forKey: .refreshToken)
+        self.user = try container.decode(UserDTO.self, forKey: .user)
+        self.households = try container.decode([HouseholdDTO].self, forKey: .households)
+        self.pendingJoinRequests = try container.decodeIfPresent(
+            [HouseholdJoinRequestDTO].self,
+            forKey: .pendingJoinRequests
+        )
     }
 }
 
@@ -152,6 +169,35 @@ public struct CreateHouseholdRequest: Codable, Sendable, Equatable, Hashable {
 
     public init(name: String) {
         self.name = name
+    }
+}
+
+public struct CreateHouseholdInviteRequest: Codable, Sendable, Equatable, Hashable {
+    public var label: String?
+    public var role: HouseholdRole
+    public var ttlHours: Int?
+
+    public init(
+        label: String? = nil,
+        role: HouseholdRole = .member,
+        ttlHours: Int? = 24
+    ) {
+        self.label = label
+        self.role = role
+        self.ttlHours = ttlHours
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case role
+        case ttlHours = "ttl_hours"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.label = try container.decodeIfPresent(String.self, forKey: .label)
+        self.role = try container.decodeIfPresent(HouseholdRole.self, forKey: .role) ?? .member
+        self.ttlHours = try container.decodeIfPresent(Int.self, forKey: .ttlHours) ?? 24
     }
 }
 
@@ -167,6 +213,28 @@ public struct JoinHouseholdRequest: Codable, Sendable, Equatable, Hashable {
     enum CodingKeys: String, CodingKey {
         case inviteCode = "invite_code"
         case displayName = "display_name"
+    }
+}
+
+public struct JoinHouseholdResponse: Codable, Sendable, Equatable, Hashable {
+    public var status: HouseholdJoinRequestStatus
+    public var household: HouseholdDTO?
+    public var joinRequest: HouseholdJoinRequestDTO?
+
+    public init(
+        status: HouseholdJoinRequestStatus,
+        household: HouseholdDTO? = nil,
+        joinRequest: HouseholdJoinRequestDTO? = nil
+    ) {
+        self.status = status
+        self.household = household
+        self.joinRequest = joinRequest
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case household
+        case joinRequest = "join_request"
     }
 }
 

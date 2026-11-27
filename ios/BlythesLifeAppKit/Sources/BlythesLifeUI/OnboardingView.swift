@@ -28,12 +28,14 @@ public struct OnboardingView: View {
     @State private var babyName: String = ""
     @State private var includeBirthDate: Bool = true
     @State private var birthDate: Date = Date()
+    @State private var maxBirthDate: Date = Date()
     @State private var householdName: String = ""
     @State private var inviteCode: String = ""
     @State private var memberDisplayName: String = ""
     @State private var setupError: String?
     @State private var isSubmitting = false
     @State private var isSigningOut = false
+    @State private var isCheckingApproval = false
 
     public init(store: BlythesLifeStore) {
         self.store = store
@@ -54,6 +56,8 @@ public struct OnboardingView: View {
                             welcomeContent
                         case .needsHouseholdSetup:
                             householdSetupContent
+                        case .awaitingApproval:
+                            awaitingApprovalView
                         }
                     }
                     .frame(maxWidth: 460, alignment: .leading)
@@ -77,11 +81,15 @@ public struct OnboardingView: View {
             switch newStage {
             case .needsHouseholdSetup:
                 prefillMemberDisplayNameIfNeeded()
+            case .awaitingApproval:
+                break
             case .signedOut:
+                let today = Date()
                 setupMode = .create
                 babyName = ""
                 includeBirthDate = true
-                birthDate = Date()
+                maxBirthDate = today
+                birthDate = today
                 householdName = ""
                 inviteCode = ""
                 memberDisplayName = ""
@@ -91,6 +99,14 @@ public struct OnboardingView: View {
         }
         .onChange(of: setupMode) { _, _ in
             setupError = nil
+        }
+        .task(id: store.sessionStage) {
+            guard store.sessionStage == .awaitingApproval else { return }
+            while !Task.isCancelled && store.sessionStage == .awaitingApproval {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled && store.sessionStage == .awaitingApproval else { break }
+                await store.checkJoinApprovalStatusAsync()
+            }
         }
     }
 
@@ -298,7 +314,7 @@ public struct OnboardingView: View {
                             DatePicker(
                                 "Birth date",
                                 selection: $birthDate,
-                                in: ...Date(),
+                                in: ...maxBirthDate,
                                 displayedComponents: .date
                             )
                             .labelsHidden()
@@ -343,7 +359,7 @@ public struct OnboardingView: View {
     private var joinHouseholdCard: some View {
         BLCard {
             VStack(alignment: .leading, spacing: BLSpacing.space5) {
-                Text("Enter the 6-digit invite code from another parent or caregiver.")
+                Text("Enter the one-time invite code from a household owner. They will tap Accept to let you in.")
                     .blTextRole(.callout)
                     .foregroundStyle(theme.textSecondary)
 
@@ -358,7 +374,7 @@ public struct OnboardingView: View {
                 }
 
                 BLButton(
-                    isSubmitting ? "Joining…" : "Join household",
+                    isSubmitting ? "Sending…" : "Request to join",
                     variant: .primary,
                     size: .lg,
                     isBlock: true
@@ -367,6 +383,96 @@ public struct OnboardingView: View {
                 }
                 .disabled(!canJoinHousehold)
             }
+        }
+    }
+
+    // MARK: - Stage 3: Awaiting Owner Approval
+
+    private var awaitingApprovalView: some View {
+        let rawName = store.pendingJoinRequest?.householdName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let householdDisplay = (rawName?.isEmpty == false) ? rawName! : "the household"
+        let requestedRole = store.pendingJoinRequest?.requestedRole ?? .member
+
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("Waiting for approval")
+                .blMicroLabel()
+                .padding(.bottom, BLSpacing.space1)
+
+            Text("Request sent")
+                .blTextRole(.display)
+                .foregroundStyle(theme.textPrimary)
+                .padding(.bottom, BLSpacing.space2)
+
+            Text("Waiting for an owner of \(householdDisplay) to accept your request. This updates automatically.")
+                .blTextRole(.body)
+                .foregroundStyle(theme.textSecondary)
+                .padding(.bottom, BLSpacing.space5)
+
+            BLCard {
+                VStack(alignment: .leading, spacing: BLSpacing.space4) {
+                    HStack(alignment: .center, spacing: BLSpacing.space3) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Household")
+                                .blMicroLabel()
+                            Text(householdDisplay)
+                                .blTextRole(.headline)
+                                .foregroundStyle(theme.textPrimary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        BLBadge(roleLabel(requestedRole), tone: .neutral)
+                    }
+
+                    Rectangle()
+                        .fill(theme.borderHairline)
+                        .frame(height: BLSpacing.borderWidth)
+
+                    HStack(spacing: BLSpacing.space2) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(theme.accentText)
+                        Text("Checking for approval…")
+                            .blTextRole(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+
+                    VStack(spacing: BLSpacing.space2) {
+                        BLButton(
+                            isCheckingApproval ? "Checking…" : "Check status",
+                            variant: .primary,
+                            size: .lg,
+                            isBlock: true
+                        ) {
+                            checkApprovalStatus()
+                        }
+                        .disabled(isCheckingApproval || isSigningOut)
+
+                        BLButton(
+                            "Use a different code",
+                            variant: .secondary,
+                            size: .md,
+                            isBlock: true
+                        ) {
+                            store.cancelPendingJoinRequestLocally()
+                        }
+                        .disabled(isCheckingApproval || isSigningOut)
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                BLButton(
+                    isSigningOut ? "Signing out…" : "Sign out",
+                    variant: .ghost,
+                    size: .sm
+                ) {
+                    submitSignOut()
+                }
+                .disabled(isCheckingApproval || isSigningOut)
+                Spacer()
+            }
+            .padding(.top, BLSpacing.space5)
         }
     }
 
@@ -404,15 +510,15 @@ public struct OnboardingView: View {
     private var inviteCodeField: some View {
         let field = BLTextField(
             label: "Invite code",
-            placeholder: "482 910",
+            placeholder: "K7M9-P4X2",
             text: $inviteCode
         )
         .autocorrectionDisabled()
 
         #if os(iOS)
         field
-            .keyboardType(.numberPad)
-            .textInputAutocapitalization(.never)
+            .keyboardType(.asciiCapable)
+            .textInputAutocapitalization(.characters)
         #else
         field
         #endif
@@ -450,7 +556,9 @@ public struct OnboardingView: View {
     }
 
     private var cleanedInviteCode: String {
-        inviteCode.filter { $0.isNumber || $0.isLetter }
+        inviteCode
+            .filter { !$0.isWhitespace && $0 != "-" }
+            .uppercased()
     }
 
     private var canCreateHousehold: Bool {
@@ -458,7 +566,15 @@ public struct OnboardingView: View {
     }
 
     private var canJoinHousehold: Bool {
-        cleanedInviteCode.count == 6 && !isSubmitting && !isSigningOut
+        (cleanedInviteCode.count == 8 || cleanedInviteCode.count == 6) && !isSubmitting && !isSigningOut
+    }
+
+    private func roleLabel(_ role: HouseholdRole) -> String {
+        switch role {
+        case .owner: "Owner"
+        case .member: "Member"
+        case .caregiver: "Caregiver"
+        }
     }
 
     // MARK: - Actions
@@ -513,8 +629,17 @@ public struct OnboardingView: View {
         }
     }
 
+    private func checkApprovalStatus() {
+        guard !isCheckingApproval, !isSigningOut else { return }
+        isCheckingApproval = true
+        Task { @MainActor in
+            defer { isCheckingApproval = false }
+            await store.checkJoinApprovalStatusAsync()
+        }
+    }
+
     private func submitSignOut() {
-        guard !isSigningOut, !isSubmitting else { return }
+        guard !isSigningOut, !isSubmitting, !isCheckingApproval else { return }
         setupError = nil
         isSigningOut = true
         Task { @MainActor in

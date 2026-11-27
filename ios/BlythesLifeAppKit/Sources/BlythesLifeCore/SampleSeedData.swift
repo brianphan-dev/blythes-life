@@ -10,6 +10,7 @@ public enum SampleSeedData: Sendable {
     public static let ownerUserId = UUID(uuidString: "10000000-0000-4000-8000-000000000003")!
     public static let spouseUserId = UUID(uuidString: "10000000-0000-4000-8000-000000000004")!
     public static let grandmaUserId = UUID(uuidString: "10000000-0000-4000-8000-000000000005")!
+    public static let sampleInviteId = UUID(uuidString: "10000000-0000-4000-8000-000000000006")!
     public static let pendingSheetId = UUID(uuidString: "20000000-0000-4000-8000-000000000001")!
     public static let earlierSheetId = UUID(uuidString: "20000000-0000-4000-8000-000000000002")!
     public static let tuesdaySheetId = UUID(uuidString: "20000000-0000-4000-8000-000000000003")!
@@ -40,6 +41,18 @@ public enum SampleSeedData: Sendable {
             HouseholdMemberDTO(householdId: householdId, userId: grandmaUserId, role: .caregiver, displayName: "Grandma")
         ]
 
+        let sampleInvite = HouseholdInviteDTO(
+            id: sampleInviteId,
+            householdId: householdId,
+            code: "K7M9P4X2",
+            label: "Babysitter",
+            role: .caregiver,
+            createdBy: ownerUserId,
+            createdAt: referenceDate.addingTimeInterval(-3600),
+            expiresAt: calendar.date(byAdding: .hour, value: 23, to: referenceDate)
+                ?? referenceDate.addingTimeInterval(23 * 3600)
+        )
+
         let household = HouseholdDTO(
             id: householdId,
             name: "Blythe's household",
@@ -48,7 +61,9 @@ public enum SampleSeedData: Sendable {
             createdBy: ownerUserId,
             createdAt: birthDateObject,
             role: .owner,
-            members: members
+            members: members,
+            activeInvites: [sampleInvite],
+            pendingJoinRequests: []
         )
 
         let schedule = ScheduleConfig(
@@ -123,7 +138,9 @@ public enum SampleSeedData: Sendable {
             createdBy: placeholderUserId,
             createdAt: referenceDate,
             role: .owner,
-            members: []
+            members: [],
+            activeInvites: [],
+            pendingJoinRequests: []
         )
 
         let profile = ProfileDTO(

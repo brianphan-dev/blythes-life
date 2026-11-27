@@ -319,17 +319,10 @@ private struct BlythesLifeRootShell: View {
     private var iPadSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Wordmark header (Newsreader display — no drawn logo)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(store.headerDateTitle)
-                    .blMicroLabel()
-                Text("Blythe's Life")
-                    .font(BLFont.display(size: 26, weight: .medium, tabularNumerals: false))
-                    .tracking(BLFont.displayTrackingRatio * 26)
-                    .foregroundStyle(theme.textPrimary)
-            }
-            .padding(.top, BLSpacing.space5)
-            .padding(.horizontal, BLSpacing.space4)
-            .padding(.bottom, BLSpacing.space4)
+            IPadSidebarHeader(store: store)
+                .padding(.top, BLSpacing.space5)
+                .padding(.horizontal, BLSpacing.space4)
+                .padding(.bottom, BLSpacing.space4)
 
             Rectangle()
                 .fill(theme.borderHairline)
@@ -392,10 +385,7 @@ private struct BlythesLifeRootShell: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(syncStatusTitle)
                         .blMicroLabel(color: syncStatusColor)
-                    Text(store.profile.displayName + (store.profileAgeLabel.isEmpty ? "" : " · \(store.profileAgeLabel)"))
-                        .blTextRole(.caption)
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
+                    IPadSidebarProfileSubtitle(store: store)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -506,6 +496,39 @@ private struct BlythesLifeRootShell: View {
         case .localOnly, .syncing:
             return theme.textSecondary
         }
+    }
+}
+
+// MARK: - Clock-Isolated iPad Sidebar Subviews
+
+@MainActor
+private struct IPadSidebarHeader: View {
+    @Environment(\.blTheme) private var theme
+    let store: BlythesLifeStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(store.headerDateTitle)
+                .blMicroLabel()
+            Text("Blythe's Life")
+                .font(BLFont.display(size: 26, weight: .medium, tabularNumerals: false))
+                .tracking(BLFont.displayTrackingRatio * 26)
+                .foregroundStyle(theme.textPrimary)
+        }
+    }
+}
+
+@MainActor
+private struct IPadSidebarProfileSubtitle: View {
+    @Environment(\.blTheme) private var theme
+    let store: BlythesLifeStore
+
+    var body: some View {
+        let age = store.profileAgeLabel
+        Text(store.profile.displayName + (age.isEmpty ? "" : " · \(age)"))
+            .blTextRole(.caption)
+            .foregroundStyle(theme.textSecondary)
+            .lineLimit(1)
     }
 }
 

@@ -620,7 +620,7 @@ struct ModelCodingTests {
         #expect(try decoder.decode(LosslessExportBundleV1.self, from: bundleData) == bundle)
     }
 
-    @Test("ScheduleConfig partial JSON decodes with canonical defaults")
+    @Test("ScheduleConfig partial JSON decodes with canonical defaults and multi-nap presets")
     func scheduleConfigDefaults() throws {
         let decoded = try decoder.decode(ScheduleConfig.self, from: Data("{}".utf8))
         #expect(decoded.wakeWindowsMinutes == [150, 195])
@@ -631,6 +631,256 @@ struct ModelCodingTests {
         #expect(decoded.backupCatnapDurationMinutes == 25)
         #expect(decoded.targetDailyMilkOzMin == nil)
         #expect(decoded.targetDailyMilkOzMax == nil)
+
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: -2) == [300])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 0) == [300])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 1) == [300])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 2) == [150, 195])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 3) == [105, 135, 150])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 4) == [75, 90, 90, 105])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 5) == [75, 90, 90, 105])
+        #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 99) == [75, 90, 90, 105])
+    }
+
+    @Test("Household invites, join requests, and updated Household/AuthSession DTOs round-trip cleanly")
+    func householdInvitesAndJoinRequestsRoundTrip() throws {
+        let now = fixedDate("2026-11-26T16:00:00.000Z")
+        let expires = fixedDate("2026-11-27T16:00:00.000Z")
+        let usedAt = fixedDate("2026-11-26T18:30:00.000Z")
+        let resolvedAt = fixedDate("2026-11-26T19:00:00.000Z")
+
+        let ownerId = UUID()
+        let grandmaId = UUID()
+        let householdId = UUID()
+        let inviteId = UUID()
+        let joinRequestId = UUID()
+
+        // Verify all HouseholdJoinRequestStatus cases round-trip.
+        #expect(Set(HouseholdJoinRequestStatus.allCases) == [.pending, .approved, .declined])
+        for status in HouseholdJoinRequestStatus.allCases {
+            let encoded = try encoder.encode(status)
+            let decoded = try decoder.decode(HouseholdJoinRequestStatus.self, from: encoded)
+            #expect(decoded == status)
+        }
+
+        // HouseholdInviteDTO (active + used/revoked variant)
+        let activeInvite = HouseholdInviteDTO(
+            id: inviteId,
+            householdId: householdId,
+            code: "BLY-9K4M-7Q2P",
+            label: "Grandma (Weekday Care)",
+            role: .caregiver,
+            createdBy: ownerId,
+            createdAt: now,
+            expiresAt: expires,
+            usedAt: nil,
+            usedBy: nil,
+            revokedAt: nil
+        )
+        let activeInviteData = try encoder.encode(activeInvite)
+        let activeInviteJSON = try #require(String(data: activeInviteData, encoding: .utf8))
+        #expect(activeInviteJSON.contains("\"household_id\""))
+        #expect(activeInviteJSON.contains("\"created_by\""))
+        #expect(activeInviteJSON.contains("\"created_at\""))
+        #expect(activeInviteJSON.contains("\"expires_at\""))
+        #expect(activeInviteJSON.contains("\"role\":\"caregiver\""))
+        #expect(try decoder.decode(HouseholdInviteDTO.self, from: activeInviteData) == activeInvite)
+
+        let usedRevokedInvite = HouseholdInviteDTO(
+            id: UUID(),
+            householdId: householdId,
+            code: "BLY-3X8N-5W1V",
+            label: nil,
+            role: .member,
+            createdBy: ownerId,
+            createdAt: now,
+            expiresAt: expires,
+            usedAt: usedAt,
+            usedBy: grandmaId,
+            revokedAt: resolvedAt
+        )
+        let usedInviteData = try encoder.encode(usedRevokedInvite)
+        let usedInviteJSON = try #require(String(data: usedInviteData, encoding: .utf8))
+        #expect(usedInviteJSON.contains("\"used_at\""))
+        #expect(usedInviteJSON.contains("\"used_by\""))
+        #expect(usedInviteJSON.contains("\"revoked_at\""))
+        #expect(try decoder.decode(HouseholdInviteDTO.self, from: usedInviteData) == usedRevokedInvite)
+
+        // HouseholdJoinRequestDTO (pending + resolved)
+        let pendingRequest = HouseholdJoinRequestDTO(
+            id: joinRequestId,
+            householdId: householdId,
+            householdName: "Phan Family",
+            inviteId: inviteId,
+            userId: grandmaId,
+            displayName: "Grandma",
+            requestedRole: .caregiver,
+            status: .pending,
+            createdAt: usedAt,
+            resolvedAt: nil
+        )
+        let pendingReqData = try encoder.encode(pendingRequest)
+        let pendingReqJSON = try #require(String(data: pendingReqData, encoding: .utf8))
+        #expect(pendingReqJSON.contains("\"household_id\""))
+        #expect(pendingReqJSON.contains("\"household_name\":\"Phan Family\""))
+        #expect(pendingReqJSON.contains("\"invite_id\""))
+        #expect(pendingReqJSON.contains("\"user_id\""))
+        #expect(pendingReqJSON.contains("\"display_name\":\"Grandma\""))
+        #expect(pendingReqJSON.contains("\"requested_role\":\"caregiver\""))
+        #expect(pendingReqJSON.contains("\"status\":\"pending\""))
+        #expect(try decoder.decode(HouseholdJoinRequestDTO.self, from: pendingReqData) == pendingRequest)
+
+        let declinedRequest = HouseholdJoinRequestDTO(
+            id: UUID(),
+            householdId: householdId,
+            householdName: "Phan Family",
+            inviteId: nil,
+            userId: grandmaId,
+            displayName: "Unknown Device",
+            requestedRole: .member,
+            status: .declined,
+            createdAt: usedAt,
+            resolvedAt: resolvedAt
+        )
+        let declinedData = try encoder.encode(declinedRequest)
+        let declinedJSON = try #require(String(data: declinedData, encoding: .utf8))
+        #expect(declinedJSON.contains("\"resolved_at\""))
+        #expect(declinedJSON.contains("\"status\":\"declined\""))
+        #expect(try decoder.decode(HouseholdJoinRequestDTO.self, from: declinedData) == declinedRequest)
+
+        // CreateHouseholdInviteRequest: custom payload + empty `{}` default decoding
+        let createInviteReq = CreateHouseholdInviteRequest(
+            label: "Babysitter",
+            role: .caregiver,
+            ttlHours: 72
+        )
+        let createInviteData = try encoder.encode(createInviteReq)
+        let createInviteJSON = try #require(String(data: createInviteData, encoding: .utf8))
+        #expect(createInviteJSON.contains("\"ttl_hours\":72"))
+        #expect(try decoder.decode(CreateHouseholdInviteRequest.self, from: createInviteData) == createInviteReq)
+
+        let emptyCreateInvite = try decoder.decode(CreateHouseholdInviteRequest.self, from: Data("{}".utf8))
+        #expect(emptyCreateInvite.label == nil)
+        #expect(emptyCreateInvite.role == .member)
+        #expect(emptyCreateInvite.ttlHours == 24)
+
+        let partialCreateInvite = try decoder.decode(
+            CreateHouseholdInviteRequest.self,
+            from: Data(#"{"label":"Spouse"}"#.utf8)
+        )
+        #expect(partialCreateInvite.label == "Spouse")
+        #expect(partialCreateInvite.role == .member)
+        #expect(partialCreateInvite.ttlHours == 24)
+
+        // HouseholdDTO with active_invites & pending_join_requests
+        let member = HouseholdMemberDTO(householdId: householdId, userId: ownerId, role: .owner, displayName: "Brian")
+        let household = HouseholdDTO(
+            id: householdId,
+            name: "Phan Family",
+            inviteCode: nil,
+            inviteExpiresAt: nil,
+            createdBy: ownerId,
+            createdAt: now,
+            role: .owner,
+            members: [member],
+            activeInvites: [activeInvite],
+            pendingJoinRequests: [pendingRequest]
+        )
+        let householdData = try encoder.encode(household)
+        let householdJSON = try #require(String(data: householdData, encoding: .utf8))
+        #expect(householdJSON.contains("\"active_invites\""))
+        #expect(householdJSON.contains("\"pending_join_requests\""))
+        #expect(try decoder.decode(HouseholdDTO.self, from: householdData) == household)
+
+        // JoinHouseholdResponse (pending + approved)
+        let pendingJoinResponse = JoinHouseholdResponse(
+            status: .pending,
+            household: nil,
+            joinRequest: pendingRequest
+        )
+        let pendingJoinData = try encoder.encode(pendingJoinResponse)
+        let pendingJoinJSON = try #require(String(data: pendingJoinData, encoding: .utf8))
+        #expect(pendingJoinJSON.contains("\"status\":\"pending\""))
+        #expect(pendingJoinJSON.contains("\"join_request\""))
+        #expect(try decoder.decode(JoinHouseholdResponse.self, from: pendingJoinData) == pendingJoinResponse)
+
+        let approvedJoinResponse = JoinHouseholdResponse(
+            status: .approved,
+            household: household,
+            joinRequest: nil
+        )
+        let approvedJoinData = try encoder.encode(approvedJoinResponse)
+        #expect(try decoder.decode(JoinHouseholdResponse.self, from: approvedJoinData) == approvedJoinResponse)
+
+        // AuthSessionResponse with pending_join_requests
+        let grandmaUser = UserDTO(id: grandmaId, displayName: "Grandma", primaryEmail: nil, createdAt: now)
+        let sessionWithPending = AuthSessionResponse(
+            accessToken: "jwt-access-grandma",
+            expiresIn: 900,
+            refreshToken: "opaque-refresh-grandma",
+            user: grandmaUser,
+            households: [],
+            pendingJoinRequests: [pendingRequest]
+        )
+        let sessionData = try encoder.encode(sessionWithPending)
+        let sessionJSON = try #require(String(data: sessionData, encoding: .utf8))
+        #expect(sessionJSON.contains("\"pending_join_requests\""))
+        #expect(try decoder.decode(AuthSessionResponse.self, from: sessionData) == sessionWithPending)
+    }
+
+    @Test("Legacy HouseholdDTO and AuthSessionResponse JSON omitting new invite/join-request keys decode cleanly")
+    func legacyHouseholdAndAuthSessionBackwardCompatibility() throws {
+        let userId = UUID()
+        let householdId = UUID()
+
+        let legacyHouseholdJSON = """
+        {
+          "id": "\(householdId.uuidString)",
+          "name": "Phan Family",
+          "invite_code": "482910",
+          "invite_expires_at": "2026-11-26T22:00:00Z",
+          "created_by": "\(userId.uuidString)",
+          "created_at": "2026-11-25T22:00:00Z",
+          "role": "owner",
+          "members": [
+            {
+              "household_id": "\(householdId.uuidString)",
+              "user_id": "\(userId.uuidString)",
+              "role": "owner",
+              "display_name": "Brian"
+            }
+          ]
+        }
+        """
+        let decodedHousehold = try decoder.decode(HouseholdDTO.self, from: Data(legacyHouseholdJSON.utf8))
+        #expect(decodedHousehold.id == householdId)
+        #expect(decodedHousehold.name == "Phan Family")
+        #expect(decodedHousehold.inviteCode == "482910")
+        #expect(decodedHousehold.activeInvites == nil)
+        #expect(decodedHousehold.pendingJoinRequests == nil)
+
+        let legacyAuthSessionJSON = """
+        {
+          "access_token": "jwt-legacy",
+          "expires_in": 900,
+          "refresh_token": "opaque-legacy",
+          "user": {
+            "id": "\(userId.uuidString)",
+            "display_name": "Brian",
+            "primary_email": "brian@example.com",
+            "created_at": "2026-11-25T22:00:00Z"
+          },
+          "households": [
+            \(legacyHouseholdJSON)
+          ]
+        }
+        """
+        let decodedSession = try decoder.decode(AuthSessionResponse.self, from: Data(legacyAuthSessionJSON.utf8))
+        #expect(decodedSession.accessToken == "jwt-legacy")
+        #expect(decodedSession.households.count == 1)
+        #expect(decodedSession.households.first?.activeInvites == nil)
+        #expect(decodedSession.households.first?.pendingJoinRequests == nil)
+        #expect(decodedSession.pendingJoinRequests == nil)
     }
 }
 
@@ -984,5 +1234,276 @@ struct WakeWindowCalculatorTests {
             calendar: pacificCalendar
         )
         #expect(noAnchor == nil)
+    }
+
+    @Test("1-nap schedule ([300]) predicts Nap 1, normal bedtime, short-nap backup catnap, and stops after catnap")
+    func oneNapScheduleTransitions() throws {
+        let config = ScheduleConfig(wakeWindowsMinutes: ScheduleConfig.defaultWakeWindows(forNapCount: 1))
+        #expect(config.wakeWindowsMinutes == [300])
+        let wake = localTime(7, 0)
+
+        // Nap 1: 7:00 AM + 5h = 12:00 PM
+        let nap1Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(10, 0),
+                wakeUpTime: wake,
+                completedNapsToday: [],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap1Prediction.wakeWindowMinutes == 300)
+        #expect(nap1Prediction.recommendedStart == localTime(12, 0))
+        #expect(nap1Prediction.windowStart == localTime(11, 45))
+        #expect(nap1Prediction.windowEnd == localTime(12, 15))
+        #expect(nap1Prediction.maxNapEnd == localTime(13, 30))
+        #expect(nap1Prediction.isBackupCatnap == false)
+
+        // Normal Nap 1 (12:00 - 13:30, 90m) -> +5h = 18:30 (> 17:00 cutoff) -> nil (bedtime next)
+        let normalNap1 = makeNap(start: localTime(12, 0), end: localTime(13, 30))
+        let afterNormalNap1 = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(14, 0),
+            wakeUpTime: wake,
+            completedNapsToday: [normalNap1],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(afterNormalNap1 == nil)
+
+        // Short Nap 1 (11:30 - 12:05, 35m < 45m) -> resets wake window to 150m -> 2:35 PM backup catnap (<= 5:00 PM)
+        let shortNap1 = makeNap(start: localTime(11, 30), end: localTime(12, 5))
+        let backupCatnap = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(13, 0),
+                wakeUpTime: wake,
+                completedNapsToday: [shortNap1],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(backupCatnap.isBackupCatnap == true)
+        #expect(backupCatnap.wakeWindowMinutes == 150)
+        #expect(backupCatnap.recommendedStart == localTime(14, 35))
+        #expect(backupCatnap.maxNapEnd == localTime(15, 0))
+
+        // After backup catnap taken (2 naps on 1-nap schedule) -> nil
+        let catnapDone = makeNap(start: localTime(14, 35), end: localTime(15, 0))
+        let afterCatnap = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(15, 15),
+            wakeUpTime: wake,
+            completedNapsToday: [shortNap1, catnapDone],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(afterCatnap == nil)
+    }
+
+    @Test("3-nap schedule ([105, 135, 150]) predicts Naps 1-3, backup catnap before cutoff, and bedtime after")
+    func threeNapScheduleTransitions() throws {
+        let config = ScheduleConfig(wakeWindowsMinutes: ScheduleConfig.defaultWakeWindows(forNapCount: 3))
+        #expect(config.wakeWindowsMinutes == [105, 135, 150])
+        let wake = localTime(7, 0)
+
+        // Nap 1: 7:00 AM + 105m = 8:45 AM
+        let nap1Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(8, 0),
+                wakeUpTime: wake,
+                completedNapsToday: [],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap1Prediction.wakeWindowMinutes == 105)
+        #expect(nap1Prediction.recommendedStart == localTime(8, 45))
+        #expect(nap1Prediction.windowStart == localTime(8, 30))
+        #expect(nap1Prediction.windowEnd == localTime(9, 0))
+        #expect(nap1Prediction.maxNapEnd == localTime(10, 15))
+        #expect(nap1Prediction.isBackupCatnap == false)
+
+        // Nap 2 after Nap 1 (8:45 - 9:45, 60m): 9:45 AM + 135m = 12:00 PM
+        let nap1 = makeNap(start: localTime(8, 45), end: localTime(9, 45))
+        let nap2Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(10, 30),
+                wakeUpTime: wake,
+                completedNapsToday: [nap1],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap2Prediction.wakeWindowMinutes == 135)
+        #expect(nap2Prediction.recommendedStart == localTime(12, 0))
+        #expect(nap2Prediction.maxNapEnd == localTime(13, 30))
+        #expect(nap2Prediction.isBackupCatnap == false)
+
+        // Nap 3 after Nap 2 (12:00 - 13:00, 60m): 1:00 PM + 150m = 3:30 PM
+        let nap2 = makeNap(start: localTime(12, 0), end: localTime(13, 0))
+        let nap3Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(14, 0),
+                wakeUpTime: wake,
+                completedNapsToday: [nap1, nap2],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap3Prediction.wakeWindowMinutes == 150)
+        #expect(nap3Prediction.recommendedStart == localTime(15, 30))
+        #expect(nap3Prediction.maxNapEnd == localTime(17, 0))
+        #expect(nap3Prediction.isBackupCatnap == false)
+
+        // Normal Nap 3 (15:30 - 16:15, 45m): 4:15 PM + 150m = 6:45 PM (> 5:00 PM cutoff) -> nil
+        let nap3 = makeNap(start: localTime(15, 30), end: localTime(16, 15))
+        let afterNormalNap3 = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(16, 30),
+            wakeUpTime: wake,
+            completedNapsToday: [nap1, nap2, nap3],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(afterNormalNap3 == nil)
+
+        // Early 3-nap day ending at 2:00 PM -> backup catnap at 4:30 PM (<= 5:00 PM cutoff, 25m cap)
+        let earlyNap1 = makeNap(start: localTime(8, 0), end: localTime(8, 45))
+        let earlyNap2 = makeNap(start: localTime(10, 30), end: localTime(11, 15))
+        let earlyNap3 = makeNap(start: localTime(13, 15), end: localTime(14, 0))
+        let backupCatnap = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(14, 30),
+                wakeUpTime: wake,
+                completedNapsToday: [earlyNap1, earlyNap2, earlyNap3],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(backupCatnap.isBackupCatnap == true)
+        #expect(backupCatnap.wakeWindowMinutes == 150)
+        #expect(backupCatnap.recommendedStart == localTime(16, 30))
+        #expect(backupCatnap.maxNapEnd == localTime(16, 55))
+
+        // After 4th nap (backup catnap taken) -> nil
+        let catnapDone = makeNap(start: localTime(16, 30), end: localTime(16, 55))
+        let afterCatnap = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(17, 0),
+            wakeUpTime: wake,
+            completedNapsToday: [earlyNap1, earlyNap2, earlyNap3, catnapDone],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(afterCatnap == nil)
+    }
+
+    @Test("4-nap schedule ([75, 90, 90, 105]) predicts Naps 1-4, backup catnap before cutoff, and bedtime after")
+    func fourNapScheduleTransitions() throws {
+        let config = ScheduleConfig(wakeWindowsMinutes: ScheduleConfig.defaultWakeWindows(forNapCount: 4))
+        #expect(config.wakeWindowsMinutes == [75, 90, 90, 105])
+        let wake = localTime(6, 30)
+
+        // Nap 1: 6:30 AM + 75m = 7:45 AM
+        let nap1Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(7, 0),
+                wakeUpTime: wake,
+                completedNapsToday: [],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap1Prediction.wakeWindowMinutes == 75)
+        #expect(nap1Prediction.recommendedStart == localTime(7, 45))
+        #expect(nap1Prediction.windowStart == localTime(7, 30))
+        #expect(nap1Prediction.windowEnd == localTime(8, 0))
+        #expect(nap1Prediction.maxNapEnd == localTime(9, 15))
+        #expect(nap1Prediction.isBackupCatnap == false)
+
+        // Nap 2 after Nap 1 (7:45 - 8:45, 60m): 8:45 AM + 90m = 10:15 AM
+        let nap1 = makeNap(start: localTime(7, 45), end: localTime(8, 45))
+        let nap2Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(9, 15),
+                wakeUpTime: wake,
+                completedNapsToday: [nap1],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap2Prediction.wakeWindowMinutes == 90)
+        #expect(nap2Prediction.recommendedStart == localTime(10, 15))
+        #expect(nap2Prediction.maxNapEnd == localTime(11, 45))
+        #expect(nap2Prediction.isBackupCatnap == false)
+
+        // Nap 3 after Nap 2 (10:15 - 11:15, 60m): 11:15 AM + 90m = 12:45 PM
+        let nap2 = makeNap(start: localTime(10, 15), end: localTime(11, 15))
+        let nap3Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(11, 45),
+                wakeUpTime: wake,
+                completedNapsToday: [nap1, nap2],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap3Prediction.wakeWindowMinutes == 90)
+        #expect(nap3Prediction.recommendedStart == localTime(12, 45))
+        #expect(nap3Prediction.maxNapEnd == localTime(14, 15))
+        #expect(nap3Prediction.isBackupCatnap == false)
+
+        // Nap 4 after Nap 3 (12:45 - 13:45, 60m): 1:45 PM + 105m = 3:30 PM
+        let nap3 = makeNap(start: localTime(12, 45), end: localTime(13, 45))
+        let nap4Prediction = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(14, 30),
+                wakeUpTime: wake,
+                completedNapsToday: [nap1, nap2, nap3],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(nap4Prediction.wakeWindowMinutes == 105)
+        #expect(nap4Prediction.recommendedStart == localTime(15, 30))
+        #expect(nap4Prediction.maxNapEnd == localTime(17, 0))
+        #expect(nap4Prediction.isBackupCatnap == false)
+
+        // Normal Nap 4 (15:30 - 16:15, 45m): 4:15 PM + 105m = 6:00 PM (> 5:00 PM cutoff) -> nil
+        let nap4 = makeNap(start: localTime(15, 30), end: localTime(16, 15))
+        let afterNormalNap4 = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(16, 30),
+            wakeUpTime: wake,
+            completedNapsToday: [nap1, nap2, nap3, nap4],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(afterNormalNap4 == nil)
+
+        // Early 4-nap day ending at 2:15 PM -> backup catnap at 4:00 PM (+105m <= 5:00 PM cutoff, 25m cap)
+        let earlyNap1 = makeNap(start: localTime(7, 30), end: localTime(8, 15))
+        let earlyNap2 = makeNap(start: localTime(9, 30), end: localTime(10, 15))
+        let earlyNap3 = makeNap(start: localTime(11, 30), end: localTime(12, 15))
+        let earlyNap4 = makeNap(start: localTime(13, 30), end: localTime(14, 15))
+        let backupCatnap = try #require(
+            WakeWindowCalculator.predictNextNap(
+                asOf: localTime(14, 45),
+                wakeUpTime: wake,
+                completedNapsToday: [earlyNap1, earlyNap2, earlyNap3, earlyNap4],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(backupCatnap.isBackupCatnap == true)
+        #expect(backupCatnap.wakeWindowMinutes == 105)
+        #expect(backupCatnap.recommendedStart == localTime(16, 0))
+        #expect(backupCatnap.maxNapEnd == localTime(16, 25))
+
+        // After 5th nap (backup catnap taken) -> nil
+        let catnapDone = makeNap(start: localTime(16, 0), end: localTime(16, 25))
+        let afterCatnap = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(16, 30),
+            wakeUpTime: wake,
+            completedNapsToday: [earlyNap1, earlyNap2, earlyNap3, earlyNap4, catnapDone],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(afterCatnap == nil)
     }
 }

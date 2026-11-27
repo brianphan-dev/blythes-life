@@ -314,7 +314,7 @@ public struct LogSheetView: View {
         request.kind == .nursing && !isEditing && (store.activeNursing != nil || nursingMode == .timer)
     }
 
-    private var effectiveTimestamp: Date {
+    private func resolvedCommitTimestamp() -> Date {
         if usesCustomTime {
             return exactTime
         }
@@ -407,14 +407,6 @@ public struct LogSheetView: View {
             return "Log \(shown) \(volumeUnitLabel(volumeUnit))"
 
         case .nursing:
-            if isNursingTimerMode {
-                guard let session = store.activeNursing else {
-                    return "Tap a side to start"
-                }
-                let elapsed = session.elapsedSeconds(asOf: store.now)
-                let mins = max(1, Int((elapsed.total / 60.0).rounded()))
-                return "Log \(mins) min nursing"
-            }
             let mins = nursingMinutesText.isEmpty ? "0" : nursingMinutesText
             return "Log \(mins) min nursing"
 
@@ -483,14 +475,22 @@ public struct LogSheetView: View {
                         }
                     }
 
-                    BLButton(
-                        ctaTitle,
-                        variant: .primary,
-                        size: .lg,
-                        isBlock: true,
-                        action: commit
-                    )
-                    .disabled(!canCommit)
+                    if isNursingTimerMode {
+                        LiveNursingCommitButton(
+                            store: store,
+                            canCommit: canCommit,
+                            action: commit
+                        )
+                    } else {
+                        BLButton(
+                            ctaTitle,
+                            variant: .primary,
+                            size: .lg,
+                            isBlock: true,
+                            action: commit
+                        )
+                        .disabled(!canCommit)
+                    }
                 }
             }
         )
@@ -595,27 +595,8 @@ public struct LogSheetView: View {
     private var nursingForm: some View {
         if isNursingTimerMode {
             VStack(alignment: .leading, spacing: BLSpacing.space4) {
-                if let session = store.activeNursing {
-                    let elapsed = session.elapsedSeconds(asOf: store.now)
-                    HStack {
-                        Text("Started \(FormattingHelpers.formatClock(session.startedAt, timeZone: store.profileTimeZone))")
-                            .blMicroLabel()
-                        Spacer()
-                        BLBadge(session.isRunning ? "Running" : "Paused", tone: .event(.nursing))
-                    }
-                    .frame(minHeight: 36)
-
-                    BLNursingTimer(
-                        leftSeconds: Int(elapsed.left),
-                        rightSeconds: Int(elapsed.right),
-                        activeSide: session.activeSide?.rawValue
-                    ) { sideId in
-                        store.tapNursingSide(sideId == "right" ? .right : .left)
-                    }
-
-                    Text("Runs on every device. You can close this.")
-                        .blTextRole(.callout)
-                        .foregroundStyle(theme.textSecondary)
+                if store.activeNursing != nil {
+                    LiveNursingTimerSection(store: store)
                 } else {
                     BLSegmentedControl(
                         options: NursingInputMode.allCases,
@@ -876,7 +857,7 @@ public struct LogSheetView: View {
 
     private func timeFieldSection(label: String) -> some View {
         let timeBinding = Binding<Date>(
-            get: { effectiveTimestamp },
+            get: { exactTime },
             set: { newDate in
                 exactTime = newDate
                 usesCustomTime = true
@@ -927,7 +908,7 @@ public struct LogSheetView: View {
             return
         }
 
-        let timestamp = effectiveTimestamp
+        let timestamp = resolvedCommitTimestamp()
 
         switch request.kind {
         case .sleep:
@@ -1027,7 +1008,7 @@ public struct LogSheetView: View {
 
     private func commitEdit(_ original: EventDTO) {
         var updated = original
-        let timestamp = effectiveTimestamp
+        let timestamp = resolvedCommitTimestamp()
 
         switch request.kind {
         case .sleep:
@@ -1178,5 +1159,65 @@ public struct LogSheetView: View {
         case .some: "Some"
         case .most: "Most"
         }
+    }
+}
+
+// MARK: - Clock-Isolated Live Nursing Subviews
+
+@MainActor
+private struct LiveNursingTimerSection: View {
+    @Environment(\.blTheme) private var theme
+    let store: BlythesLifeStore
+
+    var body: some View {
+        if let session = store.activeNursing {
+            let elapsed = session.elapsedSeconds(asOf: store.now)
+            HStack {
+                Text("Started \(FormattingHelpers.formatClock(session.startedAt, timeZone: store.profileTimeZone))")
+                    .blMicroLabel()
+                Spacer()
+                BLBadge(session.isRunning ? "Running" : "Paused", tone: .event(.nursing))
+            }
+            .frame(minHeight: 36)
+
+            BLNursingTimer(
+                leftSeconds: Int(elapsed.left),
+                rightSeconds: Int(elapsed.right),
+                activeSide: session.activeSide?.rawValue
+            ) { sideId in
+                store.tapNursingSide(sideId == "right" ? .right : .left)
+            }
+
+            Text("Runs on every device. You can close this.")
+                .blTextRole(.callout)
+                .foregroundStyle(theme.textSecondary)
+        }
+    }
+}
+
+@MainActor
+private struct LiveNursingCommitButton: View {
+    let store: BlythesLifeStore
+    let canCommit: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let title: String = {
+            guard let session = store.activeNursing else {
+                return "Tap a side to start"
+            }
+            let elapsed = session.elapsedSeconds(asOf: store.now)
+            let mins = max(1, Int((elapsed.total / 60.0).rounded()))
+            return "Log \(mins) min nursing"
+        }()
+
+        BLButton(
+            title,
+            variant: .primary,
+            size: .lg,
+            isBlock: true,
+            action: action
+        )
+        .disabled(!canCommit)
     }
 }

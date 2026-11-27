@@ -68,10 +68,32 @@ public struct BackendHealthResponse: Codable, Sendable, Equatable, Hashable {
 public struct AuthMeResponse: Codable, Sendable, Equatable, Hashable {
     public var user: UserDTO
     public var households: [HouseholdDTO]
+    public var pendingJoinRequests: [HouseholdJoinRequestDTO]?
 
-    public init(user: UserDTO, households: [HouseholdDTO]) {
+    public init(
+        user: UserDTO,
+        households: [HouseholdDTO],
+        pendingJoinRequests: [HouseholdJoinRequestDTO]? = nil
+    ) {
         self.user = user
         self.households = households
+        self.pendingJoinRequests = pendingJoinRequests
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case user
+        case households
+        case pendingJoinRequests = "pending_join_requests"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.user = try container.decode(UserDTO.self, forKey: .user)
+        self.households = try container.decode([HouseholdDTO].self, forKey: .households)
+        self.pendingJoinRequests = try container.decodeIfPresent(
+            [HouseholdJoinRequestDTO].self,
+            forKey: .pendingJoinRequests
+        )
     }
 }
 
@@ -89,7 +111,33 @@ public protocol BackendAPIProviding: Sendable {
 
     func listHouseholds(accessToken: String) async throws -> [HouseholdDTO]
     func createHousehold(name: String, accessToken: String) async throws -> HouseholdDTO
-    func joinHousehold(inviteCode: String, displayName: String?, accessToken: String) async throws -> HouseholdDTO
+    func createHouseholdInvite(
+        householdId: UUID,
+        _ request: CreateHouseholdInviteRequest,
+        accessToken: String
+    ) async throws -> HouseholdInviteDTO
+    func revokeHouseholdInvite(
+        householdId: UUID,
+        inviteId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO
+    func joinHousehold(_ request: JoinHouseholdRequest, accessToken: String) async throws -> JoinHouseholdResponse
+    func listMyJoinRequests(accessToken: String) async throws -> [HouseholdJoinRequestDTO]
+    func approveJoinRequest(
+        householdId: UUID,
+        requestId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO
+    func declineJoinRequest(
+        householdId: UUID,
+        requestId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO
+    func removeHouseholdMember(
+        householdId: UUID,
+        userId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO
     func rotateInviteCode(householdId: UUID, accessToken: String) async throws -> HouseholdDTO
 
     func listProfiles(accessToken: String) async throws -> [ProfileDTO]
@@ -117,6 +165,17 @@ public extension BackendAPIProviding {
 
     func logout(_ request: LogoutRequest) async throws {
         try await logout(request, accessToken: nil)
+    }
+
+    func joinHousehold(
+        inviteCode: String,
+        displayName: String?,
+        accessToken: String
+    ) async throws -> JoinHouseholdResponse {
+        try await joinHousehold(
+            JoinHouseholdRequest(inviteCode: inviteCode, displayName: displayName),
+            accessToken: accessToken
+        )
     }
 
     func syncPull(since: Date?, accessToken: String) async throws -> SyncPullResponse {
@@ -267,15 +326,88 @@ public final class URLSessionBackendAPIClient: BackendAPIProviding, Sendable {
         )
     }
 
+    public func createHouseholdInvite(
+        householdId: UUID,
+        _ request: CreateHouseholdInviteRequest,
+        accessToken: String
+    ) async throws -> HouseholdInviteDTO {
+        try await sendJSON(
+            method: "POST",
+            path: "/v1/households/\(householdId.uuidString.lowercased())/invites",
+            body: request,
+            accessToken: accessToken
+        )
+    }
+
+    public func revokeHouseholdInvite(
+        householdId: UUID,
+        inviteId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        try await sendJSON(
+            method: "DELETE",
+            path: "/v1/households/\(householdId.uuidString.lowercased())/invites/\(inviteId.uuidString.lowercased())",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
     public func joinHousehold(
-        inviteCode: String,
-        displayName: String?,
+        _ request: JoinHouseholdRequest,
+        accessToken: String
+    ) async throws -> JoinHouseholdResponse {
+        try await sendJSON(
+            method: "POST",
+            path: "/v1/households/join",
+            body: request,
+            accessToken: accessToken
+        )
+    }
+
+    public func listMyJoinRequests(accessToken: String) async throws -> [HouseholdJoinRequestDTO] {
+        try await sendJSON(
+            method: "GET",
+            path: "/v1/households/join-requests/mine",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
+    public func approveJoinRequest(
+        householdId: UUID,
+        requestId: UUID,
         accessToken: String
     ) async throws -> HouseholdDTO {
         try await sendJSON(
             method: "POST",
-            path: "/v1/households/join",
-            body: JoinHouseholdRequest(inviteCode: inviteCode, displayName: displayName),
+            path: "/v1/households/\(householdId.uuidString.lowercased())/join-requests/\(requestId.uuidString.lowercased())/approve",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
+    public func declineJoinRequest(
+        householdId: UUID,
+        requestId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        try await sendJSON(
+            method: "POST",
+            path: "/v1/households/\(householdId.uuidString.lowercased())/join-requests/\(requestId.uuidString.lowercased())/decline",
+            body: Optional<String>.none,
+            accessToken: accessToken
+        )
+    }
+
+    public func removeHouseholdMember(
+        householdId: UUID,
+        userId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        try await sendJSON(
+            method: "DELETE",
+            path: "/v1/households/\(householdId.uuidString.lowercased())/members/\(userId.uuidString.lowercased())",
+            body: Optional<String>.none,
             accessToken: accessToken
         )
     }

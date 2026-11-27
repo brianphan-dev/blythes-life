@@ -147,6 +147,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
     public var isSignedInWithApple: Bool
     public var hasCompletedHouseholdSetup: Bool
     public var isDemoPreview: Bool
+    public var pendingJoinRequest: HouseholdJoinRequestDTO?
 
     public init(
         profile: ProfileDTO,
@@ -164,7 +165,8 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         displayName: String? = nil,
         isSignedInWithApple: Bool = true,
         hasCompletedHouseholdSetup: Bool = true,
-        isDemoPreview: Bool = false
+        isDemoPreview: Bool = false,
+        pendingJoinRequest: HouseholdJoinRequestDTO? = nil
     ) {
         self.profile = profile
         self.household = household
@@ -182,6 +184,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         self.isSignedInWithApple = isSignedInWithApple
         self.hasCompletedHouseholdSetup = hasCompletedHouseholdSetup
         self.isDemoPreview = isDemoPreview
+        self.pendingJoinRequest = pendingJoinRequest
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -201,6 +204,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         case isSignedInWithApple
         case hasCompletedHouseholdSetup
         case isDemoPreview
+        case pendingJoinRequest
     }
 
     public init(from decoder: Decoder) throws {
@@ -221,6 +225,10 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         self.isSignedInWithApple = try container.decodeIfPresent(Bool.self, forKey: .isSignedInWithApple) ?? false
         self.hasCompletedHouseholdSetup = try container.decodeIfPresent(Bool.self, forKey: .hasCompletedHouseholdSetup) ?? true
         self.isDemoPreview = try container.decodeIfPresent(Bool.self, forKey: .isDemoPreview) ?? false
+        self.pendingJoinRequest = try container.decodeIfPresent(
+            HouseholdJoinRequestDTO.self,
+            forKey: .pendingJoinRequest
+        )
     }
 }
 

@@ -11,6 +11,7 @@ import UIKit
 public enum AppSessionStage: String, Codable, Sendable, Equatable {
     case signedOut
     case needsHouseholdSetup
+    case awaitingApproval
     case ready
 }
 
@@ -159,11 +160,13 @@ public struct RhythmNursingSpan: Identifiable, Sendable, Equatable {
     public var id: String
     public var startMinute: Double
     public var durationMinutes: Double
+    public var isLive: Bool
 
-    public init(id: String, startMinute: Double, durationMinutes: Double) {
+    public init(id: String, startMinute: Double, durationMinutes: Double, isLive: Bool = false) {
         self.id = id
         self.startMinute = startMinute
         self.durationMinutes = durationMinutes
+        self.isLive = isLive
     }
 }
 
@@ -213,6 +216,10 @@ public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
         sleepSpans.reduce(0) { $0 + $1.durationMinutes }
     }
 
+    public var totalNursingMinutes: Double {
+        nursingSpans.reduce(0) { $0 + $1.durationMinutes }
+    }
+
     public var totalBottleOz: Double {
         let sum = bottleMarks.reduce(0) { $0 + $1.amountOz }
         return (sum * 100.0).rounded() / 100.0
@@ -250,6 +257,7 @@ public final class BlythesLifeStore {
     public var toast: ToastState?
     public var syncStatus: SyncStatus
     public var sessionStage: AppSessionStage
+    public var pendingJoinRequest: HouseholdJoinRequestDTO?
     public var isDemoPreview: Bool
     public var hasCompletedHouseholdSetup: Bool
     public var isSignedInWithApple: Bool
@@ -263,6 +271,26 @@ public final class BlythesLifeStore {
     public private(set) var serverWatermark: Date?
 
     public var outboxCount: Int { outbox.count }
+
+    /// True when the current signed-in user holds the `.owner` role in the active household.
+    public var isCurrentUserHouseholdOwner: Bool {
+        household.role == .owner
+            || household.members?.first(where: { $0.userId == currentUserId })?.role == .owner
+    }
+
+    /// Unused, unrevoked, unexpired single-use invites for the active household.
+    public var activeHouseholdInvites: [HouseholdInviteDTO] {
+        (household.activeInvites ?? [])
+            .filter { $0.usedAt == nil && $0.revokedAt == nil && $0.expiresAt > now }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// Pending caregiver/partner join requests awaiting owner approval for the active household.
+    public var pendingHouseholdJoinRequests: [HouseholdJoinRequestDTO] {
+        (household.pendingJoinRequests ?? [])
+            .filter { $0.status == .pending }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
 
     /// True when the user is signed into the live backend and not previewing sample data.
     public var isLiveSession: Bool {
@@ -317,7 +345,16 @@ public final class BlythesLifeStore {
                 self.isSignedInWithApple = true
                 self.isDemoPreview = false
                 self.hasCompletedHouseholdSetup = loadedState.hasCompletedHouseholdSetup
-                self.sessionStage = loadedState.hasCompletedHouseholdSetup ? .ready : .needsHouseholdSetup
+                if loadedState.hasCompletedHouseholdSetup {
+                    self.sessionStage = .ready
+                    self.pendingJoinRequest = nil
+                } else if loadedState.pendingJoinRequest?.status == .pending {
+                    self.sessionStage = .awaitingApproval
+                    self.pendingJoinRequest = loadedState.pendingJoinRequest
+                } else {
+                    self.sessionStage = .needsHouseholdSetup
+                    self.pendingJoinRequest = nil
+                }
                 self.now = launchNow
                 self.syncStatus = loadedState.hasCompletedHouseholdSetup ? .syncing : .localOnly
             } else if let accessToken {
@@ -328,7 +365,16 @@ public final class BlythesLifeStore {
                 self.isSignedInWithApple = true
                 self.isDemoPreview = false
                 self.hasCompletedHouseholdSetup = loadedState.hasCompletedHouseholdSetup
-                self.sessionStage = loadedState.hasCompletedHouseholdSetup ? .ready : .needsHouseholdSetup
+                if loadedState.hasCompletedHouseholdSetup {
+                    self.sessionStage = .ready
+                    self.pendingJoinRequest = nil
+                } else if loadedState.pendingJoinRequest?.status == .pending {
+                    self.sessionStage = .awaitingApproval
+                    self.pendingJoinRequest = loadedState.pendingJoinRequest
+                } else {
+                    self.sessionStage = .needsHouseholdSetup
+                    self.pendingJoinRequest = nil
+                }
                 self.now = launchNow
                 if let watermark = loadedState.serverWatermark {
                     self.syncStatus = .synced(watermark)
@@ -352,6 +398,7 @@ public final class BlythesLifeStore {
                 self.isDemoPreview = false
                 self.hasCompletedHouseholdSetup = false
                 self.sessionStage = .signedOut
+                self.pendingJoinRequest = nil
                 self.now = launchNow
                 self.syncStatus = .localOnly
             }
@@ -369,6 +416,7 @@ public final class BlythesLifeStore {
             self.isDemoPreview = true
             self.hasCompletedHouseholdSetup = true
             self.sessionStage = .ready
+            self.pendingJoinRequest = nil
             self.now = initialNow ?? seedReferenceDate
             self.syncStatus = .localOnly
         }
@@ -799,20 +847,56 @@ public final class BlythesLifeStore {
                     }
 
                 case .feeding(let meta):
-                    guard event.startedAt >= dayStart && event.startedAt < dayEnd else { continue }
-                    let minute = event.startedAt.timeIntervalSince(dayStart) / 60.0
                     if meta.method == .breast {
-                        let duration = meta.durationMinutes
-                            ?? event.endedAt.map { max(1, $0.timeIntervalSince(event.startedAt) / 60.0) }
-                            ?? max(1, Double((meta.leftDurationSeconds ?? 0) + (meta.rightDurationSeconds ?? 0)) / 60.0)
+                        let explicitDuration: Double? = {
+                            if let durationMinutes = meta.durationMinutes, durationMinutes > 0 {
+                                return durationMinutes
+                            }
+                            let sideSeconds = (meta.leftDurationSeconds ?? 0) + (meta.rightDurationSeconds ?? 0)
+                            if sideSeconds > 0 {
+                                return max(1, Double(sideSeconds) / 60.0)
+                            }
+                            return nil
+                        }()
+
+                        let wallDuration: Double? = event.endedAt.flatMap { endedAt in
+                            let mins = endedAt.timeIntervalSince(event.startedAt) / 60.0
+                            return mins > 0 ? mins : nil
+                        }
+
+                        let resolvedDuration = explicitDuration ?? wallDuration ?? 1.0
+                        let effectiveEnd: Date = {
+                            if let endedAt = event.endedAt, endedAt > event.startedAt {
+                                return endedAt
+                            }
+                            return event.startedAt.addingTimeInterval(max(1.0, resolvedDuration) * 60.0)
+                        }()
+
+                        guard effectiveEnd > dayStart && event.startedAt < dayEnd else { continue }
+                        let clippedStart = max(event.startedAt, dayStart)
+                        let clippedEnd = min(effectiveEnd, dayEnd)
+                        let startMin = clippedStart.timeIntervalSince(dayStart) / 60.0
+                        let clippedDuration = clippedEnd.timeIntervalSince(clippedStart) / 60.0
+                        guard clippedDuration > 0 else { continue }
+
+                        let spanDuration: Double
+                        if event.startedAt >= dayStart && effectiveEnd <= dayEnd {
+                            spanDuration = explicitDuration ?? max(1.0, clippedDuration)
+                        } else {
+                            spanDuration = clippedDuration
+                        }
+
                         nursingSpans.append(
                             RhythmNursingSpan(
-                                id: event.id.uuidString,
-                                startMinute: minute,
-                                durationMinutes: duration
+                                id: "\(event.id.uuidString)-\(offset)",
+                                startMinute: startMin,
+                                durationMinutes: spanDuration,
+                                isLive: false
                             )
                         )
                     } else {
+                        guard event.startedAt >= dayStart && event.startedAt < dayEnd else { continue }
+                        let minute = event.startedAt.timeIntervalSince(dayStart) / 60.0
                         let ml = meta.amountMl ?? 0
                         let oz = UnitConversion.mlToOz(ml)
                         bottleMarks.append(
@@ -853,6 +937,25 @@ public final class BlythesLifeStore {
                             endMinute: endMin,
                             isLive: true,
                             isNap: openSleepIsNap
+                        )
+                    )
+                }
+            }
+
+            // Include live active nursing span on today's column
+            if isToday, let nursing = activeNursing, now >= nursing.startedAt {
+                let clippedStart = max(nursing.startedAt, dayStart)
+                let startMin = min(1440.0, max(0.0, clippedStart.timeIntervalSince(dayStart) / 60.0))
+                let elapsed = nursing.elapsedSeconds(asOf: now)
+                let liveDuration = max(1.0, elapsed.total / 60.0)
+                let clampedDuration = min(liveDuration, max(0.0, 1440.0 - startMin))
+                if clampedDuration > 0 {
+                    nursingSpans.append(
+                        RhythmNursingSpan(
+                            id: "live-nursing",
+                            startMinute: startMin,
+                            durationMinutes: clampedDuration,
+                            isLive: true
                         )
                     )
                 }
@@ -1844,6 +1947,7 @@ public final class BlythesLifeStore {
                 activeNursing = nil
                 outbox = []
                 serverWatermark = nil
+                pendingJoinRequest = nil
                 hasCompletedHouseholdSetup = true
                 sessionStage = .ready
                 persistState()
@@ -1852,7 +1956,7 @@ public final class BlythesLifeStore {
                 startRealtimeSync()
                 showToast("Signed in with Apple", undo: nil)
             } else {
-                // Brand-new user: do NOT auto-create a household yet. Let the user choose Create vs Join.
+                // Brand-new or awaiting-approval user: do NOT auto-create a household.
                 stopRealtimeSync()
                 let blank = SampleSeedData.makeBlankState(referenceDate: now)
                 household = blank.household
@@ -1864,7 +1968,13 @@ public final class BlythesLifeStore {
                 outbox = []
                 serverWatermark = nil
                 hasCompletedHouseholdSetup = false
-                sessionStage = .needsHouseholdSetup
+                if let pending = session.pendingJoinRequests?.first(where: { $0.status == .pending }) {
+                    pendingJoinRequest = pending
+                    sessionStage = .awaitingApproval
+                } else {
+                    pendingJoinRequest = nil
+                    sessionStage = .needsHouseholdSetup
+                }
                 syncStatus = .localOnly
                 persistState()
 
@@ -1919,6 +2029,7 @@ public final class BlythesLifeStore {
             activeNursing = nil
             outbox = []
             serverWatermark = nil
+            pendingJoinRequest = nil
             isDemoPreview = false
             hasCompletedHouseholdSetup = true
             sessionStage = .ready
@@ -1944,13 +2055,20 @@ public final class BlythesLifeStore {
             refreshToken = stored.refreshToken
             isSignedInWithApple = true
             if sessionStage == .signedOut {
-                sessionStage = hasCompletedHouseholdSetup ? .ready : .needsHouseholdSetup
+                if hasCompletedHouseholdSetup {
+                    sessionStage = .ready
+                } else if pendingJoinRequest?.status == .pending {
+                    sessionStage = .awaitingApproval
+                } else {
+                    sessionStage = .needsHouseholdSetup
+                }
             }
         }
 
         guard isSignedInWithApple, !isDemoPreview, (accessToken != nil || refreshToken != nil) else { return }
 
-        if sessionStage == .needsHouseholdSetup {
+        if sessionStage == .needsHouseholdSetup || sessionStage == .awaitingApproval {
+            let wasAwaitingApproval = (sessionStage == .awaitingApproval)
             do {
                 let me = try await performAuthorized { token in
                     try await apiClient.fetchMe(accessToken: token)
@@ -1964,22 +2082,61 @@ public final class BlythesLifeStore {
                 }
 
                 guard !me.households.isEmpty else {
+                    let requests: [HouseholdJoinRequestDTO]
+                    if let embedded = me.pendingJoinRequests {
+                        requests = embedded
+                    } else if wasAwaitingApproval {
+                        requests = try await performAuthorized { token in
+                            try await apiClient.listMyJoinRequests(accessToken: token)
+                        }
+                    } else {
+                        requests = (try? await performAuthorized { token in
+                            try await apiClient.listMyJoinRequests(accessToken: token)
+                        }) ?? []
+                    }
+
+                    if let pending = requests.first(where: { $0.status == .pending }) {
+                        pendingJoinRequest = pending
+                        hasCompletedHouseholdSetup = false
+                        sessionStage = .awaitingApproval
+                        syncStatus = .localOnly
+                        persistState()
+                        return
+                    }
+
+                    let latestRequest = Self.resolveTrackedJoinRequest(
+                        currentId: pendingJoinRequest?.id,
+                        from: requests
+                    )
+                    pendingJoinRequest = nil
                     hasCompletedHouseholdSetup = false
                     sessionStage = .needsHouseholdSetup
                     syncStatus = .localOnly
                     persistState()
+                    if wasAwaitingApproval && latestRequest?.status == .declined {
+                        showToast("Join request was declined", undo: nil)
+                    }
                     return
                 }
 
                 let profiles = try await performAuthorized { token in
                     try await apiClient.listProfiles(accessToken: token)
                 }
-                let chosenHousehold = Self.selectPreferredHousehold(from: me.households, profiles: profiles)
-                    ?? me.households[0]
+                let chosenHousehold: HouseholdDTO
+                if let targetHouseholdId = pendingJoinRequest?.householdId,
+                   let requestedHousehold = me.households.first(where: { $0.id == targetHouseholdId })
+                {
+                    chosenHousehold = requestedHousehold
+                } else {
+                    chosenHousehold = Self.selectPreferredHousehold(from: me.households, profiles: profiles)
+                        ?? me.households[0]
+                }
                 household = chosenHousehold
 
                 if let matchedProfile = profiles.first(where: { $0.householdId == chosenHousehold.id && $0.deletedAt == nil }) {
                     profile = matchedProfile
+                } else if wasAwaitingApproval, let fallbackProfile = profiles.first(where: { $0.deletedAt == nil }) {
+                    profile = fallbackProfile
                 } else {
                     profile = try await performAuthorized { token in
                         try await apiClient.createProfile(
@@ -2000,6 +2157,7 @@ public final class BlythesLifeStore {
                 activeNursing = nil
                 outbox = []
                 serverWatermark = nil
+                pendingJoinRequest = nil
                 hasCompletedHouseholdSetup = true
                 sessionStage = .ready
                 now = Date()
@@ -2009,6 +2167,9 @@ public final class BlythesLifeStore {
                 await flushOutbox()
                 await pullFromServer()
                 startRealtimeSync()
+                if wasAwaitingApproval {
+                    showToast("Joined \(chosenHousehold.name)", undo: nil)
+                }
             } catch BackendAPIError.unauthorized {
                 // `performAuthorized` already signed out cleanly on refresh failure.
                 return
@@ -2038,7 +2199,13 @@ public final class BlythesLifeStore {
             guard !me.households.isEmpty else {
                 stopRealtimeSync()
                 hasCompletedHouseholdSetup = false
-                sessionStage = .needsHouseholdSetup
+                if let pending = me.pendingJoinRequests?.first(where: { $0.status == .pending }) {
+                    pendingJoinRequest = pending
+                    sessionStage = .awaitingApproval
+                } else {
+                    pendingJoinRequest = nil
+                    sessionStage = .needsHouseholdSetup
+                }
                 syncStatus = .localOnly
                 persistState()
                 return
@@ -2090,6 +2257,7 @@ public final class BlythesLifeStore {
                 }
             }
 
+            pendingJoinRequest = nil
             hasCompletedHouseholdSetup = true
             sessionStage = .ready
             persistState()
@@ -2112,28 +2280,377 @@ public final class BlythesLifeStore {
         await resumeLiveSession()
     }
 
-    /// Joins an existing household using a 6-digit invite code, adopts its profile, pulls shared events, and restarts SSE.
+    /// Polls `GET /v1/auth/me` (and `GET /v1/households/join-requests/mine` when still awaiting approval)
+    /// to transition cleanly into `.ready` once approved or back to `.needsHouseholdSetup` if declined.
+    public func checkJoinApprovalStatusAsync() async {
+        guard let apiClient, !isDemoPreview, (accessToken != nil || refreshToken != nil) else { return }
+
+        do {
+            let me = try await performAuthorized { token in
+                try await apiClient.fetchMe(accessToken: token)
+            }
+            currentUserId = me.user.id
+            if let serverEmail = trimmedNonEmpty(me.user.primaryEmail) {
+                authEmail = serverEmail
+            }
+            if let serverName = trimmedNonEmpty(me.user.displayName) {
+                displayName = serverName
+            }
+
+            let approvedHousehold: HouseholdDTO? = {
+                if let targetHouseholdId = pendingJoinRequest?.householdId,
+                   let matched = me.households.first(where: { $0.id == targetHouseholdId })
+                {
+                    return matched
+                }
+                if sessionStage != .ready, let first = me.households.first {
+                    return first
+                }
+                return nil
+            }()
+
+            if let approvedHousehold {
+                let profiles = try await performAuthorized { token in
+                    try await apiClient.listProfiles(accessToken: token)
+                }
+                let chosen: HouseholdDTO
+                if pendingJoinRequest?.householdId == approvedHousehold.id {
+                    chosen = approvedHousehold
+                } else {
+                    chosen = Self.selectPreferredHousehold(from: me.households, profiles: profiles)
+                        ?? approvedHousehold
+                }
+                try await adoptJoinedHousehold(chosen, prefetchedProfiles: profiles)
+                return
+            }
+
+            let myRequests = try await performAuthorized { token in
+                try await apiClient.listMyJoinRequests(accessToken: token)
+            }
+            if let activePending = myRequests
+                .sorted(by: { $0.createdAt > $1.createdAt })
+                .first(where: { $0.status == .pending })
+            {
+                pendingJoinRequest = activePending
+                if sessionStage != .ready {
+                    hasCompletedHouseholdSetup = false
+                    sessionStage = .awaitingApproval
+                }
+                lastSyncError = nil
+                persistState()
+                return
+            }
+
+            let latest = Self.resolveTrackedJoinRequest(currentId: pendingJoinRequest?.id, from: myRequests)
+            if latest?.status == .declined {
+                pendingJoinRequest = nil
+                if sessionStage != .ready {
+                    hasCompletedHouseholdSetup = false
+                    sessionStage = .needsHouseholdSetup
+                }
+                lastSyncError = nil
+                persistState()
+                showToast("Join request was declined", undo: nil)
+            }
+        } catch BackendAPIError.unauthorized {
+            return
+        } catch {
+            lastSyncError = error.localizedDescription
+        }
+    }
+
+    /// Returns from `.awaitingApproval` back to `.needsHouseholdSetup` locally so the user can enter a different code or start a household.
+    public func cancelPendingJoinRequestLocally() {
+        pendingJoinRequest = nil
+        if sessionStage == .awaitingApproval {
+            hasCompletedHouseholdSetup = false
+            sessionStage = .needsHouseholdSetup
+        }
+        persistState()
+    }
+
+    /// Joins an existing household using a single-use 8-character (`XXXX-XXXX`) or legacy 6-digit invite code.
+    /// Transitions immediately to `.ready` when approved, or to `.awaitingApproval` when owner approval is required.
     public func joinHouseholdAsync(inviteCode: String, displayName: String? = nil) async throws {
         guard let apiClient else {
             throw BackendAPIError.networkError("Backend client is not configured.")
         }
 
-        let cleanedCode = inviteCode.filter { !$0.isWhitespace }
+        let cleanedCode = inviteCode
+            .filter { !$0.isWhitespace && $0 != "-" }
+            .uppercased()
         guard !cleanedCode.isEmpty else {
             throw BackendAPIError.httpError(statusCode: 400, message: "Invite code is required.")
         }
 
-        let joined = try await performAuthorized { token in
-            try await apiClient.joinHousehold(
-                inviteCode: cleanedCode,
-                displayName: self.trimmedNonEmpty(displayName) ?? self.displayName,
-                accessToken: token
+        let request = JoinHouseholdRequest(
+            inviteCode: cleanedCode,
+            displayName: trimmedNonEmpty(displayName) ?? self.displayName
+        )
+        let response = try await performAuthorized { token in
+            try await apiClient.joinHousehold(request, accessToken: token)
+        }
+
+        switch response.status {
+        case .approved:
+            guard let joined = response.household else {
+                throw BackendAPIError.invalidResponse
+            }
+            try await adoptJoinedHousehold(joined)
+
+        case .pending:
+            guard let req = response.joinRequest else {
+                throw BackendAPIError.invalidResponse
+            }
+            pendingJoinRequest = req
+            if sessionStage != .ready {
+                hasCompletedHouseholdSetup = false
+                sessionStage = .awaitingApproval
+            }
+            lastSyncError = nil
+            persistState()
+            showToast("Request sent · waiting for approval", undo: nil)
+
+        case .declined:
+            pendingJoinRequest = nil
+            if sessionStage == .awaitingApproval {
+                hasCompletedHouseholdSetup = false
+                sessionStage = .needsHouseholdSetup
+            }
+            persistState()
+            showToast("Join request was declined", undo: nil)
+        }
+    }
+
+    /// Creates a new single-use household invite code (`POST /v1/households/:id/invites`).
+    @discardableResult
+    public func createHouseholdInviteAsync(
+        label: String? = nil,
+        role: HouseholdRole = .member,
+        ttlHours: Int = 24
+    ) async throws -> HouseholdInviteDTO {
+        let trimmedLabel = trimmedNonEmpty(label)
+        if hasLiveSession, let apiClient {
+            let request = CreateHouseholdInviteRequest(
+                label: trimmedLabel,
+                role: role,
+                ttlHours: ttlHours
             )
+            let invite = try await performAuthorized { token in
+                try await apiClient.createHouseholdInvite(
+                    householdId: self.household.id,
+                    request,
+                    accessToken: token
+                )
+            }
+            var invites = household.activeInvites ?? []
+            invites.removeAll { $0.id == invite.id }
+            invites.insert(invite, at: 0)
+            household.activeInvites = invites
+            lastSyncError = nil
+            persistState()
+            let formatted = FormattingHelpers.formatInviteCode(invite.code)
+            showToast("Invite created · \(formatted)", undo: nil)
+            return invite
+        }
+
+        guard isDemoPreview || apiClient == nil else {
+            throw BackendAPIError.unauthorized
+        }
+
+        let localInvite = HouseholdInviteDTO(
+            householdId: household.id,
+            code: Self.generateLocalInviteCode(),
+            label: trimmedLabel,
+            role: role,
+            createdBy: currentUserId,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(TimeInterval(max(1, ttlHours) * 3600))
+        )
+        var invites = household.activeInvites ?? []
+        invites.insert(localInvite, at: 0)
+        household.activeInvites = invites
+        persistState()
+        let formatted = FormattingHelpers.formatInviteCode(localInvite.code)
+        showToast("Invite created · \(formatted)", undo: nil)
+        return localInvite
+    }
+
+    /// Revokes an active single-use household invite (`DELETE /v1/households/:id/invites/:inviteId`).
+    public func revokeHouseholdInviteAsync(inviteId: UUID) async throws {
+        if hasLiveSession, let apiClient {
+            let updated = try await performAuthorized { token in
+                try await apiClient.revokeHouseholdInvite(
+                    householdId: self.household.id,
+                    inviteId: inviteId,
+                    accessToken: token
+                )
+            }
+            household = updated
+            lastSyncError = nil
+            persistState()
+            showToast("Invite revoked", undo: nil)
+            return
+        }
+
+        guard isDemoPreview || apiClient == nil else {
+            throw BackendAPIError.unauthorized
+        }
+
+        household.activeInvites?.removeAll { $0.id == inviteId }
+        persistState()
+        showToast("Invite revoked", undo: nil)
+    }
+
+    /// Approves a pending join request as household owner (`POST /v1/households/:id/join-requests/:requestId/approve`).
+    public func approveJoinRequestAsync(requestId: UUID) async throws {
+        let requesterName = household.pendingJoinRequests?.first(where: { $0.id == requestId })?.displayName
+
+        if hasLiveSession, let apiClient {
+            let updated = try await performAuthorized { token in
+                try await apiClient.approveJoinRequest(
+                    householdId: self.household.id,
+                    requestId: requestId,
+                    accessToken: token
+                )
+            }
+            household = updated
+            lastSyncError = nil
+            persistState()
+            if let requesterName = trimmedNonEmpty(requesterName) {
+                showToast("\(requesterName) joined the household", undo: nil)
+            } else {
+                showToast("Request approved", undo: nil)
+            }
+            return
+        }
+
+        guard isDemoPreview || apiClient == nil else {
+            throw BackendAPIError.unauthorized
+        }
+
+        if let request = household.pendingJoinRequests?.first(where: { $0.id == requestId }) {
+            var members = household.members ?? []
+            if !members.contains(where: { $0.userId == request.userId }) {
+                members.append(
+                    HouseholdMemberDTO(
+                        householdId: household.id,
+                        userId: request.userId,
+                        role: request.requestedRole,
+                        displayName: request.displayName
+                    )
+                )
+            }
+            household.members = members
+        }
+        household.pendingJoinRequests?.removeAll { $0.id == requestId }
+        persistState()
+        if let requesterName = trimmedNonEmpty(requesterName) {
+            showToast("\(requesterName) joined the household", undo: nil)
+        } else {
+            showToast("Request approved", undo: nil)
+        }
+    }
+
+    /// Declines a pending join request as household owner (`POST /v1/households/:id/join-requests/:requestId/decline`).
+    public func declineJoinRequestAsync(requestId: UUID) async throws {
+        if hasLiveSession, let apiClient {
+            let updated = try await performAuthorized { token in
+                try await apiClient.declineJoinRequest(
+                    householdId: self.household.id,
+                    requestId: requestId,
+                    accessToken: token
+                )
+            }
+            household = updated
+            lastSyncError = nil
+            persistState()
+            showToast("Request declined", undo: nil)
+            return
+        }
+
+        guard isDemoPreview || apiClient == nil else {
+            throw BackendAPIError.unauthorized
+        }
+
+        household.pendingJoinRequests?.removeAll { $0.id == requestId }
+        persistState()
+        showToast("Request declined", undo: nil)
+    }
+
+    /// Removes a non-owner member from the active household (`DELETE /v1/households/:id/members/:userId`).
+    public func removeHouseholdMemberAsync(userId: UUID) async throws {
+        if hasLiveSession, let apiClient {
+            let updated = try await performAuthorized { token in
+                try await apiClient.removeHouseholdMember(
+                    householdId: self.household.id,
+                    userId: userId,
+                    accessToken: token
+                )
+            }
+            household = updated
+            lastSyncError = nil
+            persistState()
+            showToast("Member removed", undo: nil)
+            return
+        }
+
+        guard isDemoPreview || apiClient == nil else {
+            throw BackendAPIError.unauthorized
+        }
+
+        household.members?.removeAll { $0.userId == userId }
+        persistState()
+        showToast("Member removed", undo: nil)
+    }
+
+    /// Refreshes the active household (`GET /v1/households`) to pick up new active invites, join requests, and members.
+    public func refreshHouseholdAsync() async {
+        guard hasLiveSession, let apiClient else { return }
+
+        do {
+            let households = try await performAuthorized { token in
+                try await apiClient.listHouseholds(accessToken: token)
+            }
+            if let updated = households.first(where: { $0.id == self.household.id }) {
+                household = updated
+                lastSyncError = nil
+                persistState()
+            } else if let first = households.first, sessionStage == .ready {
+                household = first
+                lastSyncError = nil
+                persistState()
+            } else if households.isEmpty && sessionStage == .ready {
+                stopRealtimeSync()
+                pendingJoinRequest = nil
+                hasCompletedHouseholdSetup = false
+                sessionStage = .needsHouseholdSetup
+                syncStatus = .localOnly
+                persistState()
+            }
+        } catch BackendAPIError.unauthorized {
+            return
+        } catch {
+            lastSyncError = error.localizedDescription
+        }
+    }
+
+    private func adoptJoinedHousehold(
+        _ joined: HouseholdDTO,
+        prefetchedProfiles: [ProfileDTO]? = nil
+    ) async throws {
+        guard let apiClient else {
+            throw BackendAPIError.networkError("Backend client is not configured.")
         }
         household = joined
 
-        let profiles = try await performAuthorized { token in
-            try await apiClient.listProfiles(accessToken: token)
+        let profiles: [ProfileDTO]
+        if let prefetchedProfiles {
+            profiles = prefetchedProfiles
+        } else {
+            profiles = try await performAuthorized { token in
+                try await apiClient.listProfiles(accessToken: token)
+            }
         }
         if let matchedProfile = profiles.first(where: { $0.householdId == joined.id && $0.deletedAt == nil }) {
             profile = matchedProfile
@@ -2147,6 +2664,7 @@ public final class BlythesLifeStore {
         activeNursing = nil
         outbox = []
         serverWatermark = nil
+        pendingJoinRequest = nil
         isDemoPreview = false
         hasCompletedHouseholdSetup = true
         sessionStage = .ready
@@ -2226,6 +2744,7 @@ public final class BlythesLifeStore {
         displayName = demo.displayName
         isDemoPreview = true
         hasCompletedHouseholdSetup = false
+        pendingJoinRequest = nil
         sessionStage = .ready
         syncStatus = .localOnly
         lastSyncError = nil
@@ -2247,6 +2766,7 @@ public final class BlythesLifeStore {
         scannedSheets = []
         outbox = []
         serverWatermark = nil
+        pendingJoinRequest = nil
         authEmail = nil
         displayName = nil
         isSignedInWithApple = false
@@ -2319,6 +2839,7 @@ public final class BlythesLifeStore {
         scannedSheets = []
         outbox = []
         serverWatermark = nil
+        pendingJoinRequest = nil
         isSignedInWithApple = false
         isDemoPreview = false
         hasCompletedHouseholdSetup = false
@@ -2358,6 +2879,7 @@ public final class BlythesLifeStore {
         isDemoPreview = false
         hasCompletedHouseholdSetup = false
         sessionStage = .signedOut
+        pendingJoinRequest = nil
         authEmail = nil
         displayName = nil
         events = []
@@ -2417,7 +2939,11 @@ public final class BlythesLifeStore {
     }
 
     public func setPostureOverride(_ override: PosturePreviewOverride) {
+        #if DEBUG
         postureOverride = override
+        #else
+        postureOverride = .automatic
+        #endif
     }
 
     public func signOutOnThisDevice() {
@@ -2440,6 +2966,7 @@ public final class BlythesLifeStore {
         scannedSheets = []
         outbox = []
         serverWatermark = nil
+        pendingJoinRequest = nil
         isSignedInWithApple = false
         isDemoPreview = false
         hasCompletedHouseholdSetup = false
@@ -2463,9 +2990,15 @@ public final class BlythesLifeStore {
         currentUserId = session.user.id
         if let firstHousehold = session.households.first {
             household = firstHousehold
+            pendingJoinRequest = nil
             hasCompletedHouseholdSetup = true
             sessionStage = .ready
+        } else if let pending = session.pendingJoinRequests?.first(where: { $0.status == .pending }) {
+            pendingJoinRequest = pending
+            hasCompletedHouseholdSetup = false
+            sessionStage = .awaitingApproval
         } else {
+            pendingJoinRequest = nil
             hasCompletedHouseholdSetup = false
             sessionStage = .needsHouseholdSetup
         }
@@ -2655,11 +3188,19 @@ public final class BlythesLifeStore {
                 let stream = apiClient.syncStream(accessToken: token)
                 var receivedFrame = false
                 do {
-                    for try await _ in stream {
+                    for try await notification in stream {
                         if Task.isCancelled { break }
                         receivedFrame = true
                         attempt = 0
-                        await self.pullFromServer()
+                        if notification.entityType == "household_join_requests"
+                            || notification.entityType == "households"
+                            || notification.entityType == "household_invites"
+                            || notification.entityType == "household_members"
+                        {
+                            await self.refreshHouseholdAsync()
+                        } else {
+                            await self.pullFromServer()
+                        }
                     }
                 } catch BackendAPIError.unauthorized {
                     if Task.isCancelled { break }
@@ -2765,6 +3306,7 @@ public final class BlythesLifeStore {
         try? tokenStore.clear()
         accessToken = nil
         refreshToken = nil
+        pendingJoinRequest = nil
         isSignedInWithApple = false
         isDemoPreview = false
         sessionStage = .signedOut
@@ -2916,7 +3458,8 @@ public final class BlythesLifeStore {
             displayName: displayName,
             isSignedInWithApple: isSignedInWithApple,
             hasCompletedHouseholdSetup: hasCompletedHouseholdSetup,
-            isDemoPreview: isDemoPreview
+            isDemoPreview: isDemoPreview,
+            pendingJoinRequest: pendingJoinRequest
         )
         do {
             try storage.save(snapshot)
@@ -3002,6 +3545,21 @@ public final class BlythesLifeStore {
             }
         }
         return best
+    }
+
+    private static func resolveTrackedJoinRequest(
+        currentId: UUID?,
+        from requests: [HouseholdJoinRequestDTO]
+    ) -> HouseholdJoinRequestDTO? {
+        if let currentId, let matched = requests.first(where: { $0.id == currentId }) {
+            return matched
+        }
+        return requests.sorted(by: { $0.createdAt > $1.createdAt }).first
+    }
+
+    private static func generateLocalInviteCode() -> String {
+        let alphabet = Array("ABCDEFGHJKMNPQRSTUVWXYZ23456789")
+        return String((0 ..< 8).map { _ in alphabet[Int.random(in: 0 ..< alphabet.count)] })
     }
 
     private static func buildScanSubtitle(from drafts: [ScanReviewDraftItem]) -> String {

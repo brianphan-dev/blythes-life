@@ -38,13 +38,16 @@ private struct BLExportFileDocument: FileDocument, Sendable {
 public struct SettingsView: View {
     @Environment(\.blTheme) private var theme
     @Environment(\.blColorMode) private var colorMode
+    #if DEBUG
     @Environment(\.duoLayout) private var duoLayout
+    #endif
 
     private let store: BlythesLifeStore
 
     @State private var isBabyProfileSheetOpen = false
     @State private var isScheduleSheetOpen = false
     @State private var isMembersSheetOpen = false
+    @State private var isCreateInviteSheetOpen = false
     @State private var isJoinHouseholdSheetOpen = false
     @State private var isImportingCSV = false
     @State private var isExportingFile = false
@@ -55,7 +58,6 @@ public struct SettingsView: View {
     @State private var pendingRawNonce: String?
     @State private var isCheckingConnection = false
     @State private var lastServerCheckOK = false
-    @State private var isRotatingInviteCode = false
     @State private var isSigningOut = false
     @State private var isDeletingAccount = false
 
@@ -75,7 +77,9 @@ public struct SettingsView: View {
                             babyProfileGroup
                             napScheduleGroup
                             loggingGroup
+                            #if DEBUG
                             posturePreviewGroup
+                            #endif
                         }
                         .padding(.horizontal, BLSpacing.screenGutter)
                         .padding(.bottom, BLSpacing.space6)
@@ -106,7 +110,9 @@ public struct SettingsView: View {
                                 babyProfileGroup
                                 napScheduleGroup
                                 loggingGroup
+                                #if DEBUG
                                 posturePreviewGroup
+                                #endif
                                 householdGroup
                                 dataGroup
                                 accountGroup
@@ -152,11 +158,37 @@ public struct SettingsView: View {
             if isMembersSheetOpen {
                 HouseholdMembersSheet(
                     household: store.household,
-                    formattedInviteCode: store.formattedInviteCode,
-                    isRotatingCode: isRotatingInviteCode,
-                    onCopyCode: copyInviteCode,
-                    onRotateCode: rotateInviteCode,
+                    currentUserId: store.currentUserId,
+                    isCurrentUserOwner: store.isCurrentUserHouseholdOwner,
+                    canManageInvites: canManageInvites,
+                    onRemoveMember: { userId in
+                        try await store.removeHouseholdMemberAsync(userId: userId)
+                    },
+                    onOpenCreateInvite: {
+                        isMembersSheetOpen = false
+                        isCreateInviteSheetOpen = true
+                    },
+                    onShowError: { message in
+                        store.showInfoToast(message)
+                    },
                     onClose: { isMembersSheetOpen = false }
+                )
+                .zIndex(10)
+            }
+
+            if isCreateInviteSheetOpen {
+                CreateInviteSheet(
+                    onClose: { isCreateInviteSheetOpen = false },
+                    onCreate: { label, role in
+                        try await store.createHouseholdInviteAsync(
+                            label: label,
+                            role: role,
+                            ttlHours: 24
+                        )
+                    },
+                    onCopyCode: { code in
+                        copyInviteCode(code)
+                    }
                 )
                 .zIndex(10)
             }
@@ -172,6 +204,11 @@ public struct SettingsView: View {
                     }
                 )
                 .zIndex(10)
+            }
+        }
+        .task {
+            if store.hasLiveSession {
+                await store.refreshHouseholdAsync()
             }
         }
         .fileImporter(
@@ -228,47 +265,37 @@ public struct SettingsView: View {
 
     private var babyProfileGroup: some View {
         settingsGroup(title: "Baby profile") {
-            BLCard(isFlush: true) {
-                VStack(spacing: 0) {
-                    BLListRow(
-                        label: "Name",
-                        value: store.profile.displayName,
-                        showsChevron: true,
-                        onTap: { isBabyProfileSheetOpen = true }
-                    )
-                    BLListRow(
-                        label: "Birth date",
-                        detail: store.profileAgeLabel.isEmpty ? nil : store.profileAgeLabel,
-                        value: formattedBirthDateDisplay,
-                        showsChevron: true,
-                        showDivider: false,
-                        onTap: { isBabyProfileSheetOpen = true }
-                    )
-                }
-            }
+            BabyProfileSettingsCard(
+                store: store,
+                formattedBirthDate: formattedBirthDateDisplay,
+                onTap: { isBabyProfileSheetOpen = true }
+            )
         }
     }
 
     private var napScheduleGroup: some View {
         let config = store.profile.scheduleConfig
-        let ww1 = config.wakeWindowsMinutes.first ?? 150
-        let ww2 = config.wakeWindowsMinutes.count > 1 ? config.wakeWindowsMinutes[1] : 195
+        let windows = config.wakeWindowsMinutes.isEmpty
+            ? ScheduleConfig.defaultWakeWindowsMinutes
+            : config.wakeWindowsMinutes
 
         return settingsGroup(title: "Nap schedule") {
             BLCard(isFlush: true) {
                 VStack(spacing: 0) {
                     BLListRow(
-                        label: "Awake before nap 1",
-                        value: FormattingHelpers.formatWakeWindowFraction(minutes: ww1),
+                        label: "Naps per day",
+                        value: "\(windows.count)",
                         showsChevron: true,
                         onTap: { isScheduleSheetOpen = true }
                     )
-                    BLListRow(
-                        label: "Awake before nap 2",
-                        value: FormattingHelpers.formatWakeWindowFraction(minutes: ww2),
-                        showsChevron: true,
-                        onTap: { isScheduleSheetOpen = true }
-                    )
+                    ForEach(Array(windows.enumerated()), id: \.offset) { index, minutes in
+                        BLListRow(
+                            label: "Awake before nap \(index + 1)",
+                            value: FormattingHelpers.formatWakeWindowFraction(minutes: minutes),
+                            showsChevron: true,
+                            onTap: { isScheduleSheetOpen = true }
+                        )
+                    }
                     BLListRow(
                         label: "Nap cap",
                         value: FormattingHelpers.formatWakeWindowFraction(minutes: config.napCapMinutes),
@@ -321,6 +348,7 @@ public struct SettingsView: View {
         }
     }
 
+    #if DEBUG
     private var posturePreviewGroup: some View {
         settingsGroup(title: "Device posture (Preview)") {
             BLCard {
@@ -347,46 +375,18 @@ public struct SettingsView: View {
             }
         }
     }
+    #endif
 
     private var householdGroup: some View {
-        let memberCount = store.household.members?.count ?? 1
-
-        return settingsGroup(title: "Household") {
-            BLCard(isFlush: true) {
-                VStack(spacing: 0) {
-                    BLListRow(
-                        icon: BLSymbol.members,
-                        label: "Members",
-                        value: "\(memberCount)",
-                        showsChevron: true,
-                        onTap: { isMembersSheetOpen = true }
-                    )
-                    BLListRow(
-                        icon: BLSymbol.inviteKey,
-                        label: "Invite code",
-                        detail: "Tap to copy",
-                        value: store.formattedInviteCode,
-                        showDivider: true,
-                        onTap: copyInviteCode
-                    ) {
-                        BLButton(
-                            isRotatingInviteCode ? "Updating…" : "Rotate",
-                            variant: .secondary,
-                            size: .sm,
-                            action: rotateInviteCode
-                        )
-                        .disabled(isRotatingInviteCode)
-                    }
-                    BLListRow(
-                        icon: "person.badge.plus",
-                        label: "Join a household",
-                        detail: "Enter a 6-digit invite code",
-                        showsChevron: true,
-                        showDivider: false,
-                        onTap: { isJoinHouseholdSheetOpen = true }
-                    )
-                }
-            }
+        settingsGroup(title: "Household") {
+            HouseholdSettingsSection(
+                store: store,
+                canManageInvites: canManageInvites,
+                onOpenMembers: { isMembersSheetOpen = true },
+                onOpenCreateInvite: { isCreateInviteSheetOpen = true },
+                onOpenJoinHousehold: { isJoinHouseholdSheetOpen = true },
+                onCopyCode: copyInviteCode
+            )
         }
     }
 
@@ -560,6 +560,7 @@ public struct SettingsView: View {
 
     // MARK: - Helpers & Actions
 
+    #if DEBUG
     private var activePostureDescription: String {
         switch duoLayout.posture {
         case .compactPhone: "iPhone"
@@ -568,6 +569,14 @@ public struct SettingsView: View {
         case .duoTabletop: "iPhone Duo · Tabletop"
         case .iPadRegular: "iPad"
         }
+    }
+    #endif
+
+    private var canManageInvites: Bool {
+        let role = store.household.role
+            ?? store.household.members?.first(where: { $0.userId == store.currentUserId })?.role
+            ?? .owner
+        return role == .owner || role == .member
     }
 
     private var apiHostLabel: String {
@@ -674,8 +683,8 @@ public struct SettingsView: View {
         }
     }
 
-    private func copyInviteCode() {
-        let code = store.formattedInviteCode
+    private func copyInviteCode(_ rawCode: String) {
+        let code = FormattingHelpers.formatInviteCode(rawCode)
         #if canImport(UIKit)
         UIPasteboard.general.string = code
         #elseif canImport(AppKit)
@@ -683,15 +692,6 @@ public struct SettingsView: View {
         NSPasteboard.general.setString(code, forType: .string)
         #endif
         store.showInfoToast("Invite code copied · \(code)")
-    }
-
-    private func rotateInviteCode() {
-        guard !isRotatingInviteCode else { return }
-        isRotatingInviteCode = true
-        Task { @MainActor in
-            defer { isRotatingInviteCode = false }
-            await store.rotateInviteCodeAsync()
-        }
     }
 
     private func signOutOnThisDevice() {
@@ -811,6 +811,248 @@ public struct SettingsView: View {
     #endif
 }
 
+// MARK: - Clock-Isolated Settings Sections
+
+@MainActor
+private struct BabyProfileSettingsCard: View {
+    let store: BlythesLifeStore
+    let formattedBirthDate: String
+    let onTap: () -> Void
+
+    var body: some View {
+        let ageLabel = store.profileAgeLabel
+        BLCard(isFlush: true) {
+            VStack(spacing: 0) {
+                BLListRow(
+                    label: "Name",
+                    value: store.profile.displayName,
+                    showsChevron: true,
+                    onTap: onTap
+                )
+                BLListRow(
+                    label: "Birth date",
+                    detail: ageLabel.isEmpty ? nil : ageLabel,
+                    value: formattedBirthDate,
+                    showsChevron: true,
+                    showDivider: false,
+                    onTap: onTap
+                )
+            }
+        }
+    }
+}
+
+@MainActor
+private struct HouseholdSettingsSection: View {
+    private enum JoinRequestAction: Equatable {
+        case approving
+        case declining
+    }
+
+    @Environment(\.blTheme) private var theme
+
+    let store: BlythesLifeStore
+    let canManageInvites: Bool
+    let onOpenMembers: () -> Void
+    let onOpenCreateInvite: () -> Void
+    let onOpenJoinHousehold: () -> Void
+    let onCopyCode: (String) -> Void
+
+    @State private var busyJoinRequests: [UUID: JoinRequestAction] = [:]
+    @State private var revokingInviteIds: Set<UUID> = []
+
+    var body: some View {
+        let memberCount = store.household.members?.count ?? 1
+        let pendingRequests = store.isCurrentUserHouseholdOwner ? store.pendingHouseholdJoinRequests : []
+        let activeInvites = canManageInvites ? store.activeHouseholdInvites : []
+
+        VStack(alignment: .leading, spacing: BLSpacing.space2) {
+            if !pendingRequests.isEmpty {
+                BLCard(tone: .accent, isFlush: true) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(pendingRequests.enumerated()), id: \.element.id) { index, req in
+                            let action = busyJoinRequests[req.id]
+                            let isBusy = action != nil
+
+                            VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(req.displayName) wants to join")
+                                        .blTextRole(.body)
+                                        .foregroundStyle(theme.textPrimary)
+                                    Text(householdRoleLabel(req.requestedRole))
+                                        .blTextRole(.caption)
+                                        .foregroundStyle(theme.textSecondary)
+                                }
+
+                                HStack(spacing: BLSpacing.space2) {
+                                    BLButton(
+                                        action == .approving ? "Accepting…" : "Accept",
+                                        variant: .primary,
+                                        size: .sm
+                                    ) {
+                                        resolveJoinRequest(req.id, approve: true)
+                                    }
+                                    .disabled(isBusy)
+
+                                    BLButton(
+                                        action == .declining ? "Declining…" : "Decline",
+                                        variant: .secondary,
+                                        size: .sm
+                                    ) {
+                                        resolveJoinRequest(req.id, approve: false)
+                                    }
+                                    .disabled(isBusy)
+                                }
+                            }
+                            .padding(.vertical, BLSpacing.space3)
+                            .padding(.horizontal, BLSpacing.space4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .overlay(alignment: .bottom) {
+                                if index < pendingRequests.count - 1 {
+                                    Rectangle()
+                                        .fill(theme.accentBorder.opacity(0.45))
+                                        .frame(height: BLSpacing.borderWidth)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            BLCard(isFlush: true) {
+                VStack(spacing: 0) {
+                    BLListRow(
+                        icon: BLSymbol.members,
+                        label: "Members",
+                        value: "\(memberCount)",
+                        showsChevron: true,
+                        onTap: onOpenMembers
+                    )
+
+                    if canManageInvites {
+                        BLListRow(
+                            icon: BLSymbol.inviteKey,
+                            label: "One-time invites",
+                            detail: activeInvites.isEmpty ? "None active" : "\(activeInvites.count) active",
+                            showDivider: true
+                        ) {
+                            BLButton(
+                                "Create invite",
+                                variant: .secondary,
+                                size: .sm,
+                                action: onOpenCreateInvite
+                            )
+                        }
+
+                        ForEach(activeInvites) { invite in
+                            let isRevoking = revokingInviteIds.contains(invite.id)
+                            activeInviteRow(invite: invite, isRevoking: isRevoking)
+                        }
+                    }
+
+                    BLListRow(
+                        icon: "person.badge.plus",
+                        label: "Join a household",
+                        detail: "Enter a one-time invite code",
+                        showsChevron: true,
+                        showDivider: false,
+                        onTap: onOpenJoinHousehold
+                    )
+                }
+            }
+        }
+    }
+
+    private func activeInviteRow(invite: HouseholdInviteDTO, isRevoking: Bool) -> some View {
+        let formattedCode = FormattingHelpers.formatInviteCode(invite.code)
+        let detail = inviteDetailText(invite)
+
+        return HStack(alignment: .center, spacing: BLSpacing.space2) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(formattedCode)
+                    .font(BLFont.ui(size: 16, weight: .semibold, tabularNumerals: true))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+
+                Text(detail)
+                    .blTextRole(.caption)
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            BLButton("Copy", variant: .secondary, size: .sm) {
+                onCopyCode(invite.code)
+            }
+            .disabled(isRevoking)
+
+            BLButton(
+                isRevoking ? "Revoking…" : "Revoke",
+                variant: .danger,
+                size: .sm
+            ) {
+                revokeInvite(invite.id)
+            }
+            .disabled(isRevoking)
+        }
+        .padding(.vertical, BLSpacing.space2)
+        .padding(.horizontal, BLSpacing.space4)
+        .frame(minHeight: 52)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(theme.borderHairline)
+                .frame(height: BLSpacing.borderWidth)
+        }
+    }
+
+    private func inviteDetailText(_ invite: HouseholdInviteDTO) -> String {
+        var parts: [String] = []
+        if let label = invite.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            parts.append(label)
+        }
+        parts.append(householdRoleLabel(invite.role))
+        parts.append(FormattingHelpers.formatExpiryCountdown(invite.expiresAt, asOf: store.now))
+        return parts.joined(separator: " · ")
+    }
+
+    private func resolveJoinRequest(_ requestId: UUID, approve: Bool) {
+        guard busyJoinRequests[requestId] == nil else { return }
+        busyJoinRequests[requestId] = approve ? .approving : .declining
+        Task { @MainActor in
+            defer { busyJoinRequests.removeValue(forKey: requestId) }
+            do {
+                if approve {
+                    try await store.approveJoinRequestAsync(requestId: requestId)
+                } else {
+                    try await store.declineJoinRequestAsync(requestId: requestId)
+                }
+            } catch {
+                store.showInfoToast(error.localizedDescription)
+            }
+        }
+    }
+
+    private func revokeInvite(_ inviteId: UUID) {
+        guard !revokingInviteIds.contains(inviteId) else { return }
+        revokingInviteIds.insert(inviteId)
+        Task { @MainActor in
+            defer { revokingInviteIds.remove(inviteId) }
+            do {
+                try await store.revokeHouseholdInviteAsync(inviteId: inviteId)
+            } catch {
+                store.showInfoToast(error.localizedDescription)
+            }
+        }
+    }
+}
+
+private func householdRoleLabel(_ role: HouseholdRole) -> String {
+    switch role {
+    case .owner: "Owner"
+    case .member: "Member"
+    case .caregiver: "Caregiver"
+    }
+}
+
 // MARK: - Nap Schedule Editor Sheet
 
 private struct NapScheduleEditorSheet: View {
@@ -819,8 +1061,7 @@ private struct NapScheduleEditorSheet: View {
     let onClose: () -> Void
     let onSave: (ScheduleConfig) -> Void
 
-    @State private var wakeWindow1: Int
-    @State private var wakeWindow2: Int
+    @State private var wakeWindows: [Int]
     @State private var napCap: Int
     @State private var backupCutoff: Int
     private let baseConfig: ScheduleConfig
@@ -833,14 +1074,39 @@ private struct NapScheduleEditorSheet: View {
         self.baseConfig = initialConfig
         self.onClose = onClose
         self.onSave = onSave
-        _wakeWindow1 = State(initialValue: initialConfig.wakeWindowsMinutes.first ?? 150)
-        _wakeWindow2 = State(
-            initialValue: initialConfig.wakeWindowsMinutes.count > 1
-                ? initialConfig.wakeWindowsMinutes[1]
-                : 195
+        let source = initialConfig.wakeWindowsMinutes.isEmpty
+            ? ScheduleConfig.defaultWakeWindowsMinutes
+            : initialConfig.wakeWindowsMinutes
+        let clamped = Array(source.prefix(4)).map { min(max($0, 45), 420) }
+        _wakeWindows = State(initialValue: clamped)
+        _napCap = State(initialValue: min(max(initialConfig.napCapMinutes, 30), 240))
+        _backupCutoff = State(initialValue: min(max(initialConfig.backupCatnapCutoffMinutesFromMidnight, 840), 1140))
+    }
+
+    private var napCountBinding: Binding<Int> {
+        Binding(
+            get: { min(max(wakeWindows.count, 1), 4) },
+            set: { newCount in
+                let targetCount = min(max(newCount, 1), 4)
+                let oldCount = wakeWindows.count
+                guard targetCount != oldCount else { return }
+                if targetCount < oldCount {
+                    wakeWindows = Array(wakeWindows.prefix(targetCount))
+                } else {
+                    let defaults = ScheduleConfig.defaultWakeWindows(forNapCount: targetCount)
+                    var next = wakeWindows
+                    for index in oldCount ..< targetCount {
+                        if index < defaults.count {
+                            next.append(defaults[index])
+                        } else {
+                            let fallback = min(420, (next.last ?? 150) + 30)
+                            next.append(fallback)
+                        }
+                    }
+                    wakeWindows = next
+                }
+            }
         )
-        _napCap = State(initialValue: initialConfig.napCapMinutes)
-        _backupCutoff = State(initialValue: initialConfig.backupCatnapCutoffMinutesFromMidnight)
     }
 
     var body: some View {
@@ -853,31 +1119,54 @@ private struct NapScheduleEditorSheet: View {
                 BLEventIcon(kind: .sleep, size: .md)
             },
             content: {
-                stepperRow(
-                    label: "Awake before nap 1",
-                    value: FormattingHelpers.formatWakeWindowFraction(minutes: wakeWindow1),
-                    canDecrement: wakeWindow1 > 60,
-                    canIncrement: wakeWindow1 < 300,
-                    onDecrement: { wakeWindow1 = max(60, wakeWindow1 - 15) },
-                    onIncrement: { wakeWindow1 = min(300, wakeWindow1 + 15) }
-                )
+                VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                    Text("Naps per day")
+                        .blMicroLabel()
 
-                stepperRow(
-                    label: "Awake before nap 2",
-                    value: FormattingHelpers.formatWakeWindowFraction(minutes: wakeWindow2),
-                    canDecrement: wakeWindow2 > 90,
-                    canIncrement: wakeWindow2 < 360,
-                    onDecrement: { wakeWindow2 = max(90, wakeWindow2 - 15) },
-                    onIncrement: { wakeWindow2 = min(360, wakeWindow2 + 15) }
-                )
+                    BLSegmentedControl(
+                        options: [1, 2, 3, 4],
+                        selection: napCountBinding,
+                        size: .md,
+                        isBlock: true
+                    ) { "\($0)" }
+
+                    HStack {
+                        Spacer()
+                        BLButton(
+                            "Reset to typical for \(wakeWindows.count) \(wakeWindows.count == 1 ? "nap" : "naps")",
+                            variant: .ghost,
+                            size: .sm
+                        ) {
+                            wakeWindows = ScheduleConfig.defaultWakeWindows(forNapCount: wakeWindows.count)
+                        }
+                    }
+                }
+
+                ForEach(Array(wakeWindows.indices), id: \.self) { index in
+                    let minutes = wakeWindows[index]
+                    stepperRow(
+                        label: "Awake before nap \(index + 1)",
+                        value: FormattingHelpers.formatWakeWindowFraction(minutes: minutes),
+                        canDecrement: minutes > 45,
+                        canIncrement: minutes < 420,
+                        onDecrement: {
+                            guard index < wakeWindows.count else { return }
+                            wakeWindows[index] = max(45, wakeWindows[index] - 15)
+                        },
+                        onIncrement: {
+                            guard index < wakeWindows.count else { return }
+                            wakeWindows[index] = min(420, wakeWindows[index] + 15)
+                        }
+                    )
+                }
 
                 stepperRow(
                     label: "Nap cap",
                     value: FormattingHelpers.formatWakeWindowFraction(minutes: napCap),
                     canDecrement: napCap > 30,
-                    canIncrement: napCap < 180,
+                    canIncrement: napCap < 240,
                     onDecrement: { napCap = max(30, napCap - 15) },
-                    onIncrement: { napCap = min(180, napCap + 15) }
+                    onIncrement: { napCap = min(240, napCap + 15) }
                 )
 
                 stepperRow(
@@ -892,7 +1181,7 @@ private struct NapScheduleEditorSheet: View {
             footer: {
                 BLButton("Save schedule", variant: .primary, size: .lg, isBlock: true) {
                     var updated = baseConfig
-                    updated.wakeWindowsMinutes = [wakeWindow1, wakeWindow2]
+                    updated.wakeWindowsMinutes = wakeWindows
                     updated.napCapMinutes = napCap
                     updated.backupCatnapCutoffMinutesFromMidnight = backupCutoff
                     onSave(updated)
@@ -934,15 +1223,19 @@ private struct NapScheduleEditorSheet: View {
 
 // MARK: - Household Members Sheet
 
+@MainActor
 private struct HouseholdMembersSheet: View {
-    @Environment(\.blTheme) private var theme
-
     let household: HouseholdDTO
-    let formattedInviteCode: String
-    let isRotatingCode: Bool
-    let onCopyCode: () -> Void
-    let onRotateCode: () -> Void
+    let currentUserId: UUID
+    let isCurrentUserOwner: Bool
+    let canManageInvites: Bool
+    let onRemoveMember: @MainActor (UUID) async throws -> Void
+    let onOpenCreateInvite: () -> Void
+    let onShowError: (String) -> Void
     let onClose: () -> Void
+
+    @State private var memberPendingRemoval: HouseholdMemberDTO?
+    @State private var removingUserIds: Set<UUID> = []
 
     var body: some View {
         let members = household.members ?? []
@@ -956,53 +1249,232 @@ private struct HouseholdMembersSheet: View {
                 BLCard(isFlush: true) {
                     VStack(spacing: 0) {
                         ForEach(Array(members.enumerated()), id: \.element.userId) { index, member in
+                            let canRemove = isCurrentUserOwner
+                                && member.userId != currentUserId
+                                && member.role != .owner
+                            let isRemoving = removingUserIds.contains(member.userId)
+
                             BLListRow(
                                 label: member.displayName,
                                 showDivider: index < members.count - 1
                             ) {
-                                BLBadge(
-                                    roleLabel(member.role),
-                                    tone: member.role == .owner ? .accent : .neutral
-                                )
+                                HStack(spacing: BLSpacing.space2) {
+                                    BLBadge(
+                                        householdRoleLabel(member.role),
+                                        tone: member.role == .owner ? .accent : .neutral
+                                    )
+
+                                    if canRemove {
+                                        BLButton(
+                                            isRemoving ? "Removing…" : "Remove",
+                                            variant: .danger,
+                                            size: .sm
+                                        ) {
+                                            memberPendingRemoval = member
+                                        }
+                                        .disabled(isRemoving)
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                BLCard {
-                    VStack(alignment: .leading, spacing: BLSpacing.space3) {
-                        Text("Invite code")
-                            .blMicroLabel()
+                if canManageInvites {
+                    BLButton(
+                        "Create one-time invite",
+                        variant: .secondary,
+                        size: .md,
+                        isBlock: true,
+                        action: onOpenCreateInvite
+                    )
+                }
+            }
+        )
+        .alert(
+            "Remove member",
+            isPresented: Binding(
+                get: { memberPendingRemoval != nil },
+                set: { if !$0 { memberPendingRemoval = nil } }
+            ),
+            presenting: memberPendingRemoval
+        ) { member in
+            Button("Cancel", role: .cancel) {
+                memberPendingRemoval = nil
+            }
+            Button("Remove", role: .destructive) {
+                confirmRemove(member)
+            }
+        } message: { member in
+            Text("Remove \(member.displayName) from \(household.name)? They will lose access on their devices.")
+        }
+    }
 
-                        Text(formattedInviteCode)
-                            .font(BLFont.display(size: 32, weight: .medium, tabularNumerals: true))
-                            .foregroundStyle(theme.textPrimary)
+    private func confirmRemove(_ member: HouseholdMemberDTO) {
+        guard !removingUserIds.contains(member.userId) else { return }
+        removingUserIds.insert(member.userId)
+        memberPendingRemoval = nil
+        Task { @MainActor in
+            defer { removingUserIds.remove(member.userId) }
+            do {
+                try await onRemoveMember(member.userId)
+            } catch {
+                onShowError(error.localizedDescription)
+            }
+        }
+    }
+}
 
-                        Text("Share this 6-digit code with a parent or caregiver to join \(household.name).")
-                            .blTextRole(.caption)
-                            .foregroundStyle(theme.textSecondary)
+// MARK: - Create One-Time Invite Sheet
 
-                        HStack(spacing: BLSpacing.space2) {
-                            BLButton("Copy code", variant: .primary, size: .md, isBlock: true, action: onCopyCode)
-                            BLButton(
-                                isRotatingCode ? "Updating…" : "Rotate",
-                                variant: .secondary,
-                                size: .md,
-                                action: onRotateCode
-                            )
-                            .disabled(isRotatingCode)
+@MainActor
+private struct CreateInviteSheet: View {
+    @Environment(\.blTheme) private var theme
+
+    let onClose: () -> Void
+    let onCreate: @MainActor (String?, HouseholdRole) async throws -> HouseholdInviteDTO
+    let onCopyCode: (String) -> Void
+
+    @State private var label: String = ""
+    @State private var selectedRole: HouseholdRole = .member
+    @State private var isCreating = false
+    @State private var errorMessage: String?
+    @State private var createdInvite: HouseholdInviteDTO?
+
+    var body: some View {
+        BLSheetContainer(
+            isPresented: true,
+            title: createdInvite == nil ? "Create one-time invite" : "One-time invite",
+            showScrim: true,
+            onClose: onClose,
+            content: {
+                if let created = createdInvite {
+                    BLCard {
+                        VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                            Text("Invite code")
+                                .blMicroLabel()
+
+                            Text(FormattingHelpers.formatInviteCode(created.code))
+                                .font(BLFont.display(size: 34, weight: .medium, tabularNumerals: true))
+                                .foregroundStyle(theme.textPrimary)
+                                .textSelection(.enabled)
+
+                            Text(createdDetail(created))
+                                .blTextRole(.caption)
+                                .foregroundStyle(theme.textSecondary)
+
+                            Text("Once they enter this code, tap Accept to let them into the household.")
+                                .blTextRole(.caption)
+                                .foregroundStyle(theme.textSecondary)
                         }
                     }
+                } else {
+                    labelField
+
+                    VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                        Text("Role")
+                            .blMicroLabel()
+
+                        BLSegmentedControl(
+                            options: [HouseholdRole.member, .caregiver],
+                            selection: $selectedRole,
+                            size: .md,
+                            isBlock: true
+                        ) { role in
+                            switch role {
+                            case .member: "Parent / Member"
+                            case .caregiver: "Caregiver"
+                            case .owner: "Owner"
+                            }
+                        }
+                    }
+
+                    Text("Single-use code valid for 24 hours. An owner still taps Accept before they see any entries.")
+                        .blTextRole(.callout)
+                        .foregroundStyle(theme.textSecondary)
+
+                    if let errorMessage, !errorMessage.isEmpty {
+                        Text(errorMessage)
+                            .blTextRole(.caption)
+                            .foregroundStyle(theme.danger.ink)
+                    }
+                }
+            },
+            footer: {
+                if let created = createdInvite {
+                    VStack(spacing: BLSpacing.space2) {
+                        BLButton(
+                            "Copy code",
+                            variant: .primary,
+                            size: .lg,
+                            isBlock: true
+                        ) {
+                            onCopyCode(created.code)
+                        }
+
+                        BLButton(
+                            "Done",
+                            variant: .secondary,
+                            size: .md,
+                            isBlock: true,
+                            action: onClose
+                        )
+                    }
+                } else {
+                    BLButton(
+                        isCreating ? "Creating…" : "Create one-time code",
+                        variant: .primary,
+                        size: .lg,
+                        isBlock: true
+                    ) {
+                        submit()
+                    }
+                    .disabled(isCreating)
                 }
             }
         )
     }
 
-    private func roleLabel(_ role: HouseholdRole) -> String {
-        switch role {
-        case .owner: "Owner"
-        case .member: "Member"
-        case .caregiver: "Caregiver"
+    @ViewBuilder
+    private var labelField: some View {
+        let field = BLTextField(
+            label: "Who is this for? (optional)",
+            placeholder: "e.g. Grandma",
+            text: $label
+        )
+        #if os(iOS)
+        field.textInputAutocapitalization(.words)
+        #else
+        field
+        #endif
+    }
+
+    private func createdDetail(_ invite: HouseholdInviteDTO) -> String {
+        var parts: [String] = []
+        if let rawLabel = invite.label?.trimmingCharacters(in: .whitespacesAndNewlines), !rawLabel.isEmpty {
+            parts.append(rawLabel)
+        }
+        parts.append(householdRoleLabel(invite.role))
+        parts.append("Valid for 24 hours")
+        return parts.joined(separator: " · ")
+    }
+
+    private func submit() {
+        guard !isCreating else { return }
+        errorMessage = nil
+        isCreating = true
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let optionalLabel = trimmedLabel.isEmpty ? nil : trimmedLabel
+        let role = selectedRole
+
+        Task { @MainActor in
+            defer { isCreating = false }
+            do {
+                let created = try await onCreate(optionalLabel, role)
+                createdInvite = created
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }
@@ -1035,11 +1507,13 @@ private struct JoinHouseholdSheet: View {
     }
 
     private var cleanedInviteCode: String {
-        inviteCode.filter { $0.isNumber || $0.isLetter }
+        inviteCode
+            .filter { !$0.isWhitespace && $0 != "-" }
+            .uppercased()
     }
 
     private var canSubmit: Bool {
-        cleanedInviteCode.count == 6 && !isSubmitting
+        (cleanedInviteCode.count == 8 || cleanedInviteCode.count == 6) && !isSubmitting
     }
 
     var body: some View {
@@ -1049,7 +1523,7 @@ private struct JoinHouseholdSheet: View {
             showScrim: true,
             onClose: onClose,
             content: {
-                Text("Enter the 6-digit invite code from another parent or caregiver.")
+                Text("Enter the one-time invite code from a household owner. They will tap Accept to let you in.")
                     .blTextRole(.callout)
                     .foregroundStyle(theme.textSecondary)
 
@@ -1077,7 +1551,7 @@ private struct JoinHouseholdSheet: View {
             },
             footer: {
                 BLButton(
-                    isSubmitting ? "Joining…" : "Join household",
+                    isSubmitting ? "Sending…" : "Request to join",
                     variant: .primary,
                     size: .lg,
                     isBlock: true
@@ -1093,15 +1567,15 @@ private struct JoinHouseholdSheet: View {
     private var inviteCodeField: some View {
         let field = BLTextField(
             label: "Invite code",
-            placeholder: "482 910",
+            placeholder: "K7M9-P4X2",
             text: $inviteCode
         )
         .autocorrectionDisabled()
 
         #if os(iOS)
         field
-            .keyboardType(.numberPad)
-            .textInputAutocapitalization(.never)
+            .keyboardType(.asciiCapable)
+            .textInputAutocapitalization(.characters)
         #else
         field
         #endif
@@ -1138,6 +1612,7 @@ private struct BabyProfileEditorSheet: View {
     @State private var babyName: String
     @State private var hasBirthDate: Bool
     @State private var selectedBirthDate: Date
+    @State private var maxBirthDate: Date
     @State private var isSaving = false
     @State private var errorMessage: String?
 
@@ -1152,6 +1627,7 @@ private struct BabyProfileEditorSheet: View {
         _babyName = State(initialValue: initialName)
         _hasBirthDate = State(initialValue: initialBirthDate != nil)
         let today = Date()
+        _maxBirthDate = State(initialValue: today)
         _selectedBirthDate = State(initialValue: min(initialBirthDate ?? today, today))
     }
 
@@ -1195,7 +1671,7 @@ private struct BabyProfileEditorSheet: View {
                             DatePicker(
                                 "Birth date",
                                 selection: $selectedBirthDate,
-                                in: ...Date(),
+                                in: ...maxBirthDate,
                                 displayedComponents: .date
                             )
                             .labelsHidden()

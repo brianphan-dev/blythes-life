@@ -106,13 +106,36 @@ public enum FormattingHelpers: Sendable {
         }
     }
 
-    /// Formats a 6-digit household invite code cleanly as `"482 913"`.
+    /// Formats an 8-character invite code as `"XXXX-XXXX"` or a legacy 6-digit invite code as `"XXX XXX"`.
     public static func formatInviteCode(_ code: String?) -> String {
         guard let code else { return "—" }
-        let cleaned = code.filter { !$0.isWhitespace }
-        guard cleaned.count == 6 else { return cleaned }
-        let mid = cleaned.index(cleaned.startIndex, offsetBy: 3)
-        return "\(cleaned[..<mid]) \(cleaned[mid...])"
+        let cleaned = code
+            .filter { !$0.isWhitespace && $0 != "-" }
+            .uppercased()
+        guard !cleaned.isEmpty else { return "—" }
+        if cleaned.count == 8 {
+            let mid = cleaned.index(cleaned.startIndex, offsetBy: 4)
+            return "\(cleaned[..<mid])-\(cleaned[mid...])"
+        }
+        if cleaned.count == 6 {
+            let mid = cleaned.index(cleaned.startIndex, offsetBy: 3)
+            return "\(cleaned[..<mid]) \(cleaned[mid...])"
+        }
+        return cleaned
+    }
+
+    /// Formats a calm relative expiry countdown such as `"Expires in 23h"`, `"Expires in 45m"`, or `"Expired"`.
+    public static func formatExpiryCountdown(_ expiresAt: Date, asOf now: Date) -> String {
+        let remainingSeconds = expiresAt.timeIntervalSince(now)
+        guard remainingSeconds > 0 else {
+            return "Expired"
+        }
+        if remainingSeconds >= 3600 {
+            let hours = Int(remainingSeconds / 3600.0)
+            return "Expires in \(hours)h"
+        }
+        let minutes = max(1, Int(remainingSeconds / 60.0))
+        return "Expires in \(minutes)m"
     }
 
     /// Formats the Today screen date header (e.g. `"Wednesday, Nov 25"`).

@@ -7,6 +7,11 @@ import SwiftUI
 /// Today timeline, and adaptive Quick-Log grid (bottom 4×2 dock on iPhone/Duo Folded; left-pane 2×4 cards on Duo Unfolded & iPad).
 @MainActor
 public struct TodayView: View {
+    private struct PendingRequestAction: Equatable {
+        let id: UUID
+        let approving: Bool
+    }
+
     private static let quickKinds: [BLEventKind] = [
         .feeding, .nursing, .pump, .diaper,
         .meal, .bath, .medicine, .note
@@ -20,6 +25,8 @@ public struct TodayView: View {
     private let onOpenLog: (BLEventKind) -> Void
     private let onEditEvent: (EventDTO) -> Void
     private let onOpenReview: (ScannedSheetRecord) -> Void
+
+    @State private var pendingRequestAction: PendingRequestAction?
 
     public init(
         store: BlythesLifeStore,
@@ -186,10 +193,12 @@ public struct TodayView: View {
                     .padding(.bottom, 10)
             }
 
+            #if DEBUG
             if store.postureOverride != .automatic {
                 BLBadge(store.postureOverride.shortTitle, tone: .accent)
                     .padding(.bottom, 10)
             }
+            #endif
 
             BLIconButton(
                 icon: colorMode == .night ? BLSymbol.sun : BLSymbol.moon,
@@ -252,6 +261,13 @@ public struct TodayView: View {
 
         if let pendingSheet = store.pendingReviewSheet {
             pendingSheetBanner(sheet: pendingSheet)
+                .padding(.top, BLSpacing.space2)
+        }
+
+        if store.isCurrentUserHouseholdOwner,
+           let pendingReq = store.pendingHouseholdJoinRequests.first
+        {
+            pendingJoinRequestBanner(request: pendingReq)
                 .padding(.top, BLSpacing.space2)
         }
     }
@@ -321,6 +337,75 @@ public struct TodayView: View {
             }
             .padding(.vertical, BLSpacing.space3)
             .padding(.horizontal, 14)
+        }
+    }
+
+    private func pendingJoinRequestBanner(request: HouseholdJoinRequestDTO) -> some View {
+        let isBusy = pendingRequestAction?.id == request.id
+        let isApproving = isBusy && (pendingRequestAction?.approving == true)
+        let isDeclining = isBusy && (pendingRequestAction?.approving == false)
+
+        return BLCard(tone: .accent, isFlush: true) {
+            VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                HStack(spacing: BLSpacing.space3) {
+                    Image(systemName: BLSymbol.members)
+                        .font(.system(size: 19, weight: .medium))
+                        .foregroundStyle(theme.textPrimary)
+                        .frame(width: 28)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(request.displayName) wants to join")
+                            .font(BLFont.ui(size: 16, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+
+                        Text("Used a one-time invite · tap to accept")
+                            .blTextRole(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(spacing: BLSpacing.space2) {
+                    BLButton(
+                        isApproving ? "Accepting…" : "Accept",
+                        variant: .primary,
+                        size: .sm
+                    ) {
+                        handleJoinRequest(request.id, approve: true)
+                    }
+                    .disabled(isBusy)
+
+                    BLButton(
+                        isDeclining ? "Declining…" : "Decline",
+                        variant: .secondary,
+                        size: .sm
+                    ) {
+                        handleJoinRequest(request.id, approve: false)
+                    }
+                    .disabled(isBusy)
+                }
+            }
+            .padding(.vertical, BLSpacing.space3)
+            .padding(.horizontal, 14)
+        }
+    }
+
+    private func handleJoinRequest(_ requestId: UUID, approve: Bool) {
+        guard pendingRequestAction == nil else { return }
+        pendingRequestAction = PendingRequestAction(id: requestId, approving: approve)
+        Task { @MainActor in
+            defer { pendingRequestAction = nil }
+            do {
+                if approve {
+                    try await store.approveJoinRequestAsync(requestId: requestId)
+                } else {
+                    try await store.declineJoinRequestAsync(requestId: requestId)
+                }
+            } catch {
+                store.showInfoToast(error.localizedDescription)
+            }
         }
     }
 

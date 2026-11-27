@@ -46,7 +46,7 @@ public struct RhythmView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         headerView
                             .padding(.horizontal, -BLSpacing.screenGutter)
-                        legendView(days: days)
+                        legendView
                         rhythmChart(days: days, selectedIndex: clampedIndex, chartHeight: 432)
                     }
                     .padding(.horizontal, BLSpacing.screenGutter)
@@ -76,10 +76,12 @@ public struct RhythmView: View {
 
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            legendView(days: days)
+                            legendView
                             rhythmChart(days: days, selectedIndex: clampedIndex, chartHeight: 384)
                             if let selectedDay {
                                 dayTotalsCard(day: selectedDay)
+                                    .padding(.top, BLSpacing.space3)
+                                selectedDayEventsSection(day: selectedDay)
                                     .padding(.top, BLSpacing.space3)
                             }
                         }
@@ -112,9 +114,8 @@ public struct RhythmView: View {
         .padding(.bottom, BLSpacing.space3)
     }
 
-    private func legendView(days: [RhythmDaySummary]) -> some View {
-        let hasNursing = days.contains { !$0.nursingSpans.isEmpty }
-        return BLFlowLayout(horizontalSpacing: BLSpacing.space3, verticalSpacing: 6) {
+    private var legendView: some View {
+        BLFlowLayout(horizontalSpacing: BLSpacing.space3, verticalSpacing: 6) {
             legendItem(label: "Sleep") {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(theme.sleep.solid)
@@ -134,12 +135,10 @@ public struct RhythmView: View {
                     )
                     .frame(width: 9, height: 9)
             }
-            if hasNursing {
-                legendItem(label: "Nursing") {
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(theme.feeding.solid)
-                        .frame(width: 4, height: 11)
-                }
+            legendItem(label: "Nursing") {
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                    .fill(theme.feeding.ink)
+                    .frame(width: 5, height: 11)
             }
             legendItem(label: "Meal") {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -254,7 +253,10 @@ public struct RhythmView: View {
             unit: unit
         )
         let bottleNoun = day.bottleCount == 1 ? "bottle" : "bottles"
-        let nursingSuffix = day.nursingCount > 0 ? " · \(day.nursingCount) nursing" : ""
+        let nursingDurationText = FormattingHelpers.formatDuration(minutes: day.totalNursingMinutes)
+        let nursingSessionNoun = day.nursingCount == 1 ? "session" : "sessions"
+        let nursingOnly = day.nursingCount > 0 && day.bottleCount == 0
+        let bothBottlesAndNursing = day.nursingCount > 0 && day.bottleCount > 0
 
         return BLCard {
             VStack(alignment: .leading, spacing: BLSpacing.space2) {
@@ -275,11 +277,19 @@ public struct RhythmView: View {
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    totalMetric(
-                        value: milkText,
-                        label: "\(day.bottleCount) \(bottleNoun)\(nursingSuffix)"
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if nursingOnly {
+                        totalMetric(
+                            value: nursingDurationText,
+                            label: "\(day.nursingCount) nursing"
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        totalMetric(
+                            value: milkText,
+                            label: "\(day.bottleCount) \(bottleNoun)"
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
 
                     totalMetric(
                         value: "\(day.diaperCount)",
@@ -292,6 +302,26 @@ public struct RhythmView: View {
                         label: "Meals"
                     )
                     .frame(minWidth: 46, alignment: .leading)
+                }
+
+                if bothBottlesAndNursing {
+                    Rectangle()
+                        .fill(theme.borderHairline)
+                        .frame(height: BLSpacing.borderWidth)
+                        .padding(.top, BLSpacing.space1)
+
+                    HStack(alignment: .firstTextBaseline, spacing: BLSpacing.space2) {
+                        Text("Nursing")
+                            .blMicroLabel()
+                        Spacer()
+                        Text(nursingDurationText)
+                            .font(BLFont.display(size: 19, weight: .medium, tabularNumerals: true))
+                            .foregroundStyle(theme.textPrimary)
+                        Text("· \(day.nursingCount) \(nursingSessionNoun)")
+                            .blTextRole(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .padding(.top, 2)
                 }
             }
         }
@@ -415,10 +445,10 @@ private struct RhythmDayColumn: View {
             }
 
             // 3. Bottle marks (formula solid dot, breast milk hollow ring)
-            let feedX = size.width * 0.24
+            let bottleX = size.width * 0.20
             for mark in day.bottleMarks {
                 let y = CGFloat(mark.minute) * pxPerMinute
-                let dotRect = CGRect(x: feedX - 4.5, y: y - 4.5, width: 9, height: 9)
+                let dotRect = CGRect(x: bottleX - 4.5, y: y - 4.5, width: 9, height: 9)
                 let circle = Path(ellipseIn: dotRect)
                 if mark.isBreastMilk {
                     context.fill(circle, with: .color(theme.bgSurface))
@@ -428,19 +458,25 @@ private struct RhythmDayColumn: View {
                 }
             }
 
-            // 4. Nursing vertical bars
+            // 4. Nursing vertical bars (dedicated lane with paper halo for high contrast on paper & sleep spans)
+            let nursingX = size.width * 0.42
             for span in day.nursingSpans {
                 let top = CGFloat(span.startMinute) * pxPerMinute
-                let height = max(5, CGFloat(span.durationMinutes) * pxPerMinute)
-                let barRect = CGRect(x: feedX - 2.5, y: top, width: 5, height: height)
-                context.fill(
-                    Path(roundedRect: barRect, cornerRadius: 2),
-                    with: .color(theme.feeding.solid)
-                )
+                let height = max(10, CGFloat(span.durationMinutes) * pxPerMinute)
+                let barRect = CGRect(x: nursingX - 3, y: top, width: 6, height: height)
+                let haloRect = barRect.insetBy(dx: -0.75, dy: -0.75)
+                let haloPath = Path(roundedRect: haloRect, cornerRadius: 3.75)
+                let barPath = Path(roundedRect: barRect, cornerRadius: 3)
+
+                context.stroke(haloPath, with: .color(theme.bgSurface), lineWidth: 1.5)
+                context.fill(barPath, with: .color(theme.feeding.ink))
+                if span.isLive {
+                    context.stroke(barPath, with: .color(theme.accent), lineWidth: 1.5)
+                }
             }
 
             // 5. Meal squares
-            let mealX = size.width * 0.52
+            let mealX = size.width * 0.65
             for minute in day.mealMinutes {
                 let y = CGFloat(minute) * pxPerMinute
                 let rect = CGRect(x: mealX - 4, y: y - 4, width: 8, height: 8)
@@ -451,7 +487,7 @@ private struct RhythmDayColumn: View {
             }
 
             // 6. Diaper horizontal dashes
-            let diaperWidth: CGFloat = min(9, max(5, size.width * 0.28))
+            let diaperWidth: CGFloat = min(9, max(5, size.width * 0.15))
             let diaperX = max(0, size.width * 0.90 - diaperWidth)
             for minute in day.diaperMinutes {
                 let y = CGFloat(minute) * pxPerMinute

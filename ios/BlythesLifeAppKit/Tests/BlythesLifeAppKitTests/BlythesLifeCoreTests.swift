@@ -70,14 +70,22 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
         var refreshHandler: (@Sendable (RefreshTokenRequest) throws -> AuthSessionResponse)?
         var meHandler: (@Sendable (String) throws -> AuthMeResponse)?
         var deleteAccountHandler: (@Sendable (String) throws -> Void)?
+        var listHouseholdsHandler: (@Sendable (String) throws -> [HouseholdDTO])?
         var createHouseholdHandler: (@Sendable (String, String) throws -> HouseholdDTO)?
-        var joinHouseholdHandler: (@Sendable (String, String?, String) throws -> HouseholdDTO)?
+        var createHouseholdInviteHandler: (@Sendable (UUID, CreateHouseholdInviteRequest, String) throws -> HouseholdInviteDTO)?
+        var revokeHouseholdInviteHandler: (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)?
+        var joinHouseholdHandler: (@Sendable (JoinHouseholdRequest, String) throws -> JoinHouseholdResponse)?
+        var listMyJoinRequestsHandler: (@Sendable (String) throws -> [HouseholdJoinRequestDTO])?
+        var approveJoinRequestHandler: (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)?
+        var declineJoinRequestHandler: (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)?
+        var removeHouseholdMemberHandler: (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)?
         var rotateInviteHandler: (@Sendable (UUID, String) throws -> HouseholdDTO)?
         var listProfilesHandler: (@Sendable (String) throws -> [ProfileDTO])?
         var createProfileHandler: (@Sendable (CreateProfileRequest, String) throws -> ProfileDTO)?
         var updateProfileHandler: (@Sendable (UUID, UpdateProfileRequest, String) throws -> ProfileDTO)?
         var syncPushHandler: (@Sendable (SyncPushRequest, String) throws -> SyncPushResponse)?
         var syncPullHandler: (@Sendable (Date?, Int, String) throws -> SyncPullResponse)?
+        var syncStreamHandler: (@Sendable (String) -> AsyncThrowingStream<SyncStreamNotification, Error>)?
         var presignHandler: (@Sendable (PresignUploadRequest, String) throws -> PresignUploadResponse)?
         var extractHandler: (@Sendable (ExtractPaperScanRequest, String) throws -> PaperScanDTO)?
         var confirmHandler: (@Sendable (ConfirmPaperScanRequest, String) throws -> PaperScanDTO)?
@@ -87,7 +95,8 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
         var pushedRequests: [SyncPushRequest] = []
         var confirmedScanRequests: [ConfirmPaperScanRequest] = []
         var refreshRequests: [RefreshTokenRequest] = []
-        var joinRequests: [(inviteCode: String, displayName: String?)] = []
+        var joinRequests: [JoinHouseholdRequest] = []
+        var createdInviteRequests: [(householdId: UUID, request: CreateHouseholdInviteRequest)] = []
         var updatedProfileRequests: [(profileId: UUID, request: UpdateProfileRequest)] = []
         var deleteAccountCallCount: Int = 0
         var logoutCallCount: Int = 0
@@ -161,8 +170,12 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
     }
 
     func listHouseholds(accessToken: String) async throws -> [HouseholdDTO] {
-        state.withLock {
-            $0.recordedCalls.append("GET /v1/households")
+        let handler = state.withLock { s -> (@Sendable (String) throws -> [HouseholdDTO])? in
+            s.recordedCalls.append("GET /v1/households")
+            return s.listHouseholdsHandler
+        }
+        if let handler {
+            return try handler(accessToken)
         }
         return []
     }
@@ -178,16 +191,124 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
         return HouseholdDTO(name: name, inviteCode: "654321", createdBy: SampleSeedData.ownerUserId)
     }
 
-    func joinHousehold(inviteCode: String, displayName: String?, accessToken: String) async throws -> HouseholdDTO {
-        let handler = state.withLock { s -> (@Sendable (String, String?, String) throws -> HouseholdDTO)? in
+    func createHouseholdInvite(
+        householdId: UUID,
+        _ request: CreateHouseholdInviteRequest,
+        accessToken: String
+    ) async throws -> HouseholdInviteDTO {
+        let handler = state.withLock { s -> (@Sendable (UUID, CreateHouseholdInviteRequest, String) throws -> HouseholdInviteDTO)? in
+            s.recordedCalls.append("POST /v1/households/\(householdId.uuidString.lowercased())/invites")
+            s.createdInviteRequests.append((householdId, request))
+            return s.createHouseholdInviteHandler
+        }
+        if let handler {
+            return try handler(householdId, request, accessToken)
+        }
+        return HouseholdInviteDTO(
+            householdId: householdId,
+            code: "K7M9P4X2",
+            label: request.label,
+            role: request.role,
+            createdBy: SampleSeedData.ownerUserId,
+            expiresAt: Date().addingTimeInterval(TimeInterval((request.ttlHours ?? 24) * 3600))
+        )
+    }
+
+    func revokeHouseholdInvite(
+        householdId: UUID,
+        inviteId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        let handler = state.withLock { s -> (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append(
+                "DELETE /v1/households/\(householdId.uuidString.lowercased())/invites/\(inviteId.uuidString.lowercased())"
+            )
+            return s.revokeHouseholdInviteHandler
+        }
+        if let handler {
+            return try handler(householdId, inviteId, accessToken)
+        }
+        return HouseholdDTO(
+            id: householdId,
+            name: "Blythe's household",
+            createdBy: SampleSeedData.ownerUserId,
+            activeInvites: []
+        )
+    }
+
+    func joinHousehold(_ request: JoinHouseholdRequest, accessToken: String) async throws -> JoinHouseholdResponse {
+        let handler = state.withLock { s -> (@Sendable (JoinHouseholdRequest, String) throws -> JoinHouseholdResponse)? in
             s.recordedCalls.append("POST /v1/households/join")
-            s.joinRequests.append((inviteCode, displayName))
+            s.joinRequests.append(request)
             return s.joinHouseholdHandler
         }
         if let handler {
-            return try handler(inviteCode, displayName, accessToken)
+            return try handler(request, accessToken)
         }
-        return HouseholdDTO(name: "Joined", inviteCode: inviteCode, createdBy: SampleSeedData.ownerUserId)
+        let joined = HouseholdDTO(name: "Joined", inviteCode: request.inviteCode, createdBy: SampleSeedData.ownerUserId)
+        return JoinHouseholdResponse(status: .approved, household: joined)
+    }
+
+    func listMyJoinRequests(accessToken: String) async throws -> [HouseholdJoinRequestDTO] {
+        let handler = state.withLock { s -> (@Sendable (String) throws -> [HouseholdJoinRequestDTO])? in
+            s.recordedCalls.append("GET /v1/households/join-requests/mine")
+            return s.listMyJoinRequestsHandler
+        }
+        if let handler {
+            return try handler(accessToken)
+        }
+        return []
+    }
+
+    func approveJoinRequest(
+        householdId: UUID,
+        requestId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        let handler = state.withLock { s -> (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append(
+                "POST /v1/households/\(householdId.uuidString.lowercased())/join-requests/\(requestId.uuidString.lowercased())/approve"
+            )
+            return s.approveJoinRequestHandler
+        }
+        if let handler {
+            return try handler(householdId, requestId, accessToken)
+        }
+        return HouseholdDTO(id: householdId, name: "Blythe's household", createdBy: SampleSeedData.ownerUserId)
+    }
+
+    func declineJoinRequest(
+        householdId: UUID,
+        requestId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        let handler = state.withLock { s -> (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append(
+                "POST /v1/households/\(householdId.uuidString.lowercased())/join-requests/\(requestId.uuidString.lowercased())/decline"
+            )
+            return s.declineJoinRequestHandler
+        }
+        if let handler {
+            return try handler(householdId, requestId, accessToken)
+        }
+        return HouseholdDTO(id: householdId, name: "Blythe's household", createdBy: SampleSeedData.ownerUserId)
+    }
+
+    func removeHouseholdMember(
+        householdId: UUID,
+        userId: UUID,
+        accessToken: String
+    ) async throws -> HouseholdDTO {
+        let handler = state.withLock { s -> (@Sendable (UUID, UUID, String) throws -> HouseholdDTO)? in
+            s.recordedCalls.append(
+                "DELETE /v1/households/\(householdId.uuidString.lowercased())/members/\(userId.uuidString.lowercased())"
+            )
+            return s.removeHouseholdMemberHandler
+        }
+        if let handler {
+            return try handler(householdId, userId, accessToken)
+        }
+        return HouseholdDTO(id: householdId, name: "Blythe's household", createdBy: SampleSeedData.ownerUserId)
     }
 
     func rotateInviteCode(householdId: UUID, accessToken: String) async throws -> HouseholdDTO {
@@ -283,8 +404,12 @@ private final class MockBackendAPI: BackendAPIProviding, Sendable {
     }
 
     func syncStream(accessToken: String) -> AsyncThrowingStream<SyncStreamNotification, Error> {
-        state.withLock {
-            $0.recordedCalls.append("GET /v1/sync/stream")
+        let handler = state.withLock { s -> (@Sendable (String) -> AsyncThrowingStream<SyncStreamNotification, Error>)? in
+            s.recordedCalls.append("GET /v1/sync/stream")
+            return s.syncStreamHandler
+        }
+        if let handler {
+            return handler(accessToken)
         }
         return AsyncThrowingStream { $0.finish() }
     }
@@ -520,6 +645,29 @@ struct FormattingHelpersTests {
         #expect(FormattingHelpers.formatAmount(4.0, unit: .oz) == "4 oz")
         #expect(FormattingHelpers.formatAmount(95.0, unit: .ml) == "95 mL")
         #expect(FormattingHelpers.formatMinutesFromMidnight(990) == "4:30 PM")
+    }
+
+    @Test("Invite code formatting handles 8-char XXXX-XXXX, legacy 6-digit XXX XXX, and nil")
+    func inviteCodeFormatting() {
+        #expect(FormattingHelpers.formatInviteCode("k7m9p4x2") == "K7M9-P4X2")
+        #expect(FormattingHelpers.formatInviteCode("K7M9-P4X2") == "K7M9-P4X2")
+        #expect(FormattingHelpers.formatInviteCode(" k7m9 - p4x2 ") == "K7M9-P4X2")
+        #expect(FormattingHelpers.formatInviteCode("482913") == "482 913")
+        #expect(FormattingHelpers.formatInviteCode("482 913") == "482 913")
+        #expect(FormattingHelpers.formatInviteCode("ab12") == "AB12")
+        #expect(FormattingHelpers.formatInviteCode("") == "—")
+        #expect(FormattingHelpers.formatInviteCode("   -  ") == "—")
+        #expect(FormattingHelpers.formatInviteCode(nil) == "—")
+    }
+
+    @Test("Expiry countdown formats calm relative hours, minutes, and expired copy")
+    func expiryCountdownFormatting() {
+        let now = makeDate(hour: 12, minute: 0)
+        #expect(FormattingHelpers.formatExpiryCountdown(now.addingTimeInterval(23 * 3600 + 1800), asOf: now) == "Expires in 23h")
+        #expect(FormattingHelpers.formatExpiryCountdown(now.addingTimeInterval(45 * 60), asOf: now) == "Expires in 45m")
+        #expect(FormattingHelpers.formatExpiryCountdown(now.addingTimeInterval(20), asOf: now) == "Expires in 1m")
+        #expect(FormattingHelpers.formatExpiryCountdown(now, asOf: now) == "Expired")
+        #expect(FormattingHelpers.formatExpiryCountdown(now.addingTimeInterval(-300), asOf: now) == "Expired")
     }
 }
 
@@ -890,6 +1038,67 @@ struct BlythesLifeStoreTests {
         }
     }
 
+    @Test("RhythmDaySummary.totalNursingMinutes sums completed + live activeNursing sessions and clips across midnight")
+    func rhythmNursingTotalsLiveAndMidnightClipping() {
+        let store = BlythesLifeStore.makeDemo()
+
+        // 1. Completed nursing event on today (12m)
+        store.logManualNursing(startedAt: makeDate(day: 25, hour: 11, minute: 30), minutes: 12, side: .left)
+
+        // 2. Completed nursing event with endedAt == nil (only durationMinutes = 8m)
+        let nilEndEvent = EventDTO(
+            id: UUID(),
+            profileId: store.profile.id,
+            eventType: .feeding,
+            startedAt: makeDate(day: 25, hour: 8, minute: 15),
+            endedAt: nil,
+            timezone: store.profile.defaultTimezone,
+            metadata: .feeding(FeedingMetadata(method: .breast, substance: .breastMilk, side: .right, durationMinutes: 8)),
+            createdBy: store.currentUserId,
+            updatedBy: store.currentUserId
+        )
+        store.events.append(nilEndEvent)
+
+        // 3. Midnight-crossing nursing event: Nov 24 11:50 PM -> Nov 25 12:10 AM (10m yesterday + 10m today)
+        store.logManualNursing(startedAt: makeDate(day: 24, hour: 23, minute: 50), minutes: 20, side: .both)
+
+        // 4. Live active nursing timer started at 12:54 PM, running for 10m (6m left + 4m right)
+        let t0 = store.now
+        store.tapNursingSide(.left)
+        store.tick(now: t0.addingTimeInterval(6 * 60))
+        store.tapNursingSide(.right)
+        store.tick(now: t0.addingTimeInterval(10 * 60))
+
+        let days = store.rhythmWeekDays
+        let yesterday = days[5]
+        let today = days[6]
+
+        // Yesterday got the 10m portion before midnight (11:50 PM - 12:00 AM)
+        #expect(yesterday.nursingCount == 1)
+        #expect(abs(yesterday.totalNursingMinutes - 10.0) < 0.01)
+        #expect(yesterday.nursingSpans.first?.isLive == false)
+
+        // Today got: 10m (after midnight) + 8m (nil endedAt) + 12m (manual) + 10m (live activeNursing) = 40m
+        #expect(today.nursingCount == 4)
+        #expect(abs(today.totalNursingMinutes - 40.0) < 0.01)
+
+        let liveNursingSpans = today.nursingSpans.filter(\.isLive)
+        #expect(liveNursingSpans.count == 1)
+        #expect(liveNursingSpans[0].id == "live-nursing")
+        #expect(abs(liveNursingSpans[0].durationMinutes - 10.0) < 0.01)
+    }
+
+    @Test("setPostureOverride applies override in DEBUG and stays automatic in Release builds")
+    func postureOverrideBuildGuard() {
+        let store = BlythesLifeStore.makeDemo()
+        store.setPostureOverride(.duoTabletop)
+        #if DEBUG
+        #expect(store.postureOverride == .duoTabletop)
+        #else
+        #expect(store.postureOverride == .automatic)
+        #endif
+    }
+
     @Test("Outbox flushes against mock BackendAPIProviding")
     func outboxFlushSync() async {
         let mockAPI = MockBackendAPI()
@@ -1137,14 +1346,15 @@ struct LiveBackendIntegrationTests {
                     households: []
                 )
             }
-            state.joinHouseholdHandler = { code, _, _ in
-                #expect(code == "882244")
-                return HouseholdDTO(
+            state.joinHouseholdHandler = { req, _ in
+                #expect(req.inviteCode == "882244")
+                let joined = HouseholdDTO(
                     id: spouseHouseholdId,
                     name: "Blythe's household",
                     inviteCode: "882244",
                     createdBy: SampleSeedData.ownerUserId
                 )
+                return JoinHouseholdResponse(status: .approved, household: joined)
             }
             state.listProfilesHandler = { _ in
                 [
@@ -1532,14 +1742,15 @@ struct LiveBackendIntegrationTests {
         )
 
         mockAPI.state.withLock { state in
-            state.joinHouseholdHandler = { code, _, _ in
-                #expect(code == "482913")
-                return HouseholdDTO(
+            state.joinHouseholdHandler = { req, _ in
+                #expect(req.inviteCode == "482913")
+                let joined = HouseholdDTO(
                     id: joinedHouseholdId,
                     name: "Blythe's household",
                     inviteCode: "482913",
                     createdBy: SampleSeedData.ownerUserId
                 )
+                return JoinHouseholdResponse(status: .approved, household: joined)
             }
             state.listProfilesHandler = { _ in
                 [
@@ -1807,6 +2018,450 @@ struct LiveBackendIntegrationTests {
         #expect(confirmedRequests[0].events.count == 3)
         #expect(pushedRequests.isEmpty) // Zero duplicate /v1/sync/push!
     }
+
+    @Test("Creating and revoking single-use invites updates household.activeInvites and formats XXXX-XXXX")
+    func createAndRevokeHouseholdInvites() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "owner-jwt",
+                refreshToken: "rt-owner",
+                deviceId: "dev-owner"
+            )
+        )
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        let householdId = store.household.id
+        let newInviteId = UUID()
+        let refNow = store.now
+
+        mockAPI.state.withLock { state in
+            state.createHouseholdInviteHandler = { hid, req, token in
+                #expect(hid == householdId)
+                #expect(token == "owner-jwt")
+                #expect(req.label == "Grandma")
+                #expect(req.role == .caregiver)
+                #expect(req.ttlHours == 48)
+                return HouseholdInviteDTO(
+                    id: newInviteId,
+                    householdId: hid,
+                    code: "K7M9P4X2",
+                    label: req.label,
+                    role: req.role,
+                    createdBy: SampleSeedData.ownerUserId,
+                    createdAt: refNow,
+                    expiresAt: refNow.addingTimeInterval(48 * 3600)
+                )
+            }
+            state.revokeHouseholdInviteHandler = { hid, iid, token in
+                #expect(hid == householdId)
+                #expect(iid == newInviteId)
+                #expect(token == "owner-jwt")
+                return HouseholdDTO(
+                    id: hid,
+                    name: "Blythe's household",
+                    inviteCode: "482913",
+                    createdBy: SampleSeedData.ownerUserId,
+                    role: .owner,
+                    members: [
+                        HouseholdMemberDTO(
+                            householdId: hid,
+                            userId: SampleSeedData.ownerUserId,
+                            role: .owner,
+                            displayName: "Brian"
+                        )
+                    ],
+                    activeInvites: [],
+                    pendingJoinRequests: []
+                )
+            }
+        }
+
+        let created = try await store.createHouseholdInviteAsync(
+            label: "  Grandma  ",
+            role: .caregiver,
+            ttlHours: 48
+        )
+        #expect(created.id == newInviteId)
+        #expect(FormattingHelpers.formatInviteCode(created.code) == "K7M9-P4X2")
+        #expect(store.activeHouseholdInvites.contains(where: { $0.id == newInviteId }))
+        #expect(store.toast?.message == "Invite created · K7M9-P4X2")
+
+        // Verify expired/used/revoked invites are excluded from activeHouseholdInvites
+        let expiredInvite = HouseholdInviteDTO(
+            householdId: householdId,
+            code: "AAAA1111",
+            createdBy: SampleSeedData.ownerUserId,
+            expiresAt: refNow.addingTimeInterval(-60)
+        )
+        let usedInvite = HouseholdInviteDTO(
+            householdId: householdId,
+            code: "BBBB2222",
+            createdBy: SampleSeedData.ownerUserId,
+            expiresAt: refNow.addingTimeInterval(3600),
+            usedAt: refNow
+        )
+        let revokedInvite = HouseholdInviteDTO(
+            householdId: householdId,
+            code: "CCCC3333",
+            createdBy: SampleSeedData.ownerUserId,
+            expiresAt: refNow.addingTimeInterval(3600),
+            revokedAt: refNow
+        )
+        store.household.activeInvites?.append(contentsOf: [expiredInvite, usedInvite, revokedInvite])
+        #expect(!store.activeHouseholdInvites.contains(where: { $0.id == expiredInvite.id }))
+        #expect(!store.activeHouseholdInvites.contains(where: { $0.id == usedInvite.id }))
+        #expect(!store.activeHouseholdInvites.contains(where: { $0.id == revokedInvite.id }))
+
+        try await store.revokeHouseholdInviteAsync(inviteId: newInviteId)
+        #expect(store.activeHouseholdInvites.isEmpty)
+        #expect(store.toast?.message == "Invite revoked")
+
+        let calls = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(calls.contains("POST /v1/households/\(householdId.uuidString.lowercased())/invites"))
+        #expect(
+            calls.contains(
+                "DELETE /v1/households/\(householdId.uuidString.lowercased())/invites/\(newInviteId.uuidString.lowercased())"
+            )
+        )
+    }
+
+    @Test("Pending join code transitions to awaitingApproval, then checkJoinApprovalStatusAsync handles approval and decline")
+    func pendingJoinApprovalAndDeclineFlows() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-caregiver")
+        let storage = InMemoryLocalStateStorage()
+        let caregiverId = UUID()
+        let targetHouseholdId = UUID()
+        let targetProfileId = UUID()
+        let requestId = UUID()
+
+        let pendingRequest = HouseholdJoinRequestDTO(
+            id: requestId,
+            householdId: targetHouseholdId,
+            householdName: "Phan Family",
+            inviteId: UUID(),
+            userId: caregiverId,
+            displayName: "Grandma",
+            requestedRole: .caregiver,
+            status: .pending,
+            createdAt: makeDate(hour: 10, minute: 0)
+        )
+        let approvedHousehold = HouseholdDTO(
+            id: targetHouseholdId,
+            name: "Phan Family",
+            createdBy: SampleSeedData.ownerUserId,
+            role: .caregiver,
+            members: [
+                HouseholdMemberDTO(householdId: targetHouseholdId, userId: SampleSeedData.ownerUserId, role: .owner, displayName: "Brian"),
+                HouseholdMemberDTO(householdId: targetHouseholdId, userId: caregiverId, role: .caregiver, displayName: "Grandma")
+            ]
+        )
+        let targetProfile = ProfileDTO(
+            id: targetProfileId,
+            householdId: targetHouseholdId,
+            displayName: "Blythe",
+            defaultTimezone: "America/Los_Angeles"
+        )
+        let caregiverUser = UserDTO(id: caregiverId, displayName: "Grandma", primaryEmail: "grandma@example.com")
+
+        mockAPI.state.withLock { state in
+            state.signInHandler = { _ in
+                AuthSessionResponse(
+                    accessToken: "jwt-cg",
+                    expiresIn: 900,
+                    refreshToken: "rt-cg",
+                    user: caregiverUser,
+                    households: [],
+                    pendingJoinRequests: []
+                )
+            }
+            state.joinHouseholdHandler = { req, _ in
+                #expect(req.inviteCode == "K7M9P4X2")
+                #expect(req.displayName == "Grandma")
+                return JoinHouseholdResponse(status: .pending, household: nil, joinRequest: pendingRequest)
+            }
+            state.meHandler = { _ in
+                AuthMeResponse(user: caregiverUser, households: [])
+            }
+            state.listMyJoinRequestsHandler = { _ in
+                [pendingRequest]
+            }
+        }
+
+        let store = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        try await store.completeAppleSignIn(identityToken: "jwt", rawNonce: "nonce")
+        defer { store.stopRealtimeSync() }
+        #expect(store.sessionStage == .needsHouseholdSetup)
+
+        // 1. Submit 8-char hyphenated code -> enters .awaitingApproval
+        try await store.joinHouseholdAsync(inviteCode: " k7m9-p4x2 ", displayName: "Grandma")
+        #expect(store.sessionStage == .awaitingApproval)
+        #expect(store.hasCompletedHouseholdSetup == false)
+        #expect(store.pendingJoinRequest == pendingRequest)
+        #expect(store.toast?.message == "Request sent · waiting for approval")
+
+        // Verify relaunch restores .awaitingApproval from persisted state
+        let relaunched = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        #expect(relaunched.sessionStage == .awaitingApproval)
+        #expect(relaunched.pendingJoinRequest == pendingRequest)
+
+        // 2. Poll while still pending -> remains .awaitingApproval
+        await store.checkJoinApprovalStatusAsync()
+        #expect(store.sessionStage == .awaitingApproval)
+        #expect(store.pendingJoinRequest?.id == requestId)
+
+        // 3. Poll after owner declines -> returns to .needsHouseholdSetup with toast
+        let declinedRequest = HouseholdJoinRequestDTO(
+            id: requestId,
+            householdId: targetHouseholdId,
+            householdName: "Phan Family",
+            userId: caregiverId,
+            displayName: "Grandma",
+            requestedRole: .caregiver,
+            status: .declined,
+            createdAt: makeDate(hour: 10, minute: 0),
+            resolvedAt: makeDate(hour: 10, minute: 5)
+        )
+        mockAPI.state.withLock { state in
+            state.listMyJoinRequestsHandler = { _ in [declinedRequest] }
+        }
+        await store.checkJoinApprovalStatusAsync()
+        #expect(store.sessionStage == .needsHouseholdSetup)
+        #expect(store.pendingJoinRequest == nil)
+        #expect(store.toast?.message == "Join request was declined")
+
+        // 4. Re-request and verify cancelPendingJoinRequestLocally returns to .needsHouseholdSetup
+        try await store.joinHouseholdAsync(inviteCode: "K7M9-P4X2", displayName: "Grandma")
+        #expect(store.sessionStage == .awaitingApproval)
+        store.cancelPendingJoinRequestLocally()
+        #expect(store.sessionStage == .needsHouseholdSetup)
+        #expect(store.pendingJoinRequest == nil)
+
+        // 5. Re-request and verify checkJoinApprovalStatusAsync transitions to .ready once approved
+        try await store.joinHouseholdAsync(inviteCode: "K7M9-P4X2", displayName: "Grandma")
+        #expect(store.sessionStage == .awaitingApproval)
+
+        mockAPI.state.withLock { state in
+            state.meHandler = { _ in
+                AuthMeResponse(user: caregiverUser, households: [approvedHousehold])
+            }
+            state.listProfilesHandler = { _ in [targetProfile] }
+            state.syncPullHandler = { _, _, _ in
+                SyncPullResponse(events: [], profiles: [targetProfile], serverWatermark: Date(), hasMore: false)
+            }
+        }
+
+        await store.checkJoinApprovalStatusAsync()
+        #expect(store.sessionStage == .ready)
+        #expect(store.hasCompletedHouseholdSetup == true)
+        #expect(store.pendingJoinRequest == nil)
+        #expect(store.household.id == targetHouseholdId)
+        #expect(store.profile.id == targetProfileId)
+        #expect(store.isCurrentUserHouseholdOwner == false)
+        #expect(store.toast?.message == "Joined Phan Family")
+    }
+
+    @Test("completeAppleSignIn enters awaitingApproval when server returns pendingJoinRequests and no households")
+    func completeAppleSignInRestoresAwaitingApproval() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(deviceId: "dev-pending-signin")
+        let storage = InMemoryLocalStateStorage()
+        let userId = UUID()
+        let pending = HouseholdJoinRequestDTO(
+            id: UUID(),
+            householdId: UUID(),
+            householdName: "Blythe's household",
+            userId: userId,
+            displayName: "Sarah",
+            requestedRole: .member,
+            status: .pending
+        )
+
+        mockAPI.state.withLock { state in
+            state.signInHandler = { _ in
+                AuthSessionResponse(
+                    accessToken: "jwt-pending",
+                    expiresIn: 900,
+                    refreshToken: "rt-pending",
+                    user: UserDTO(id: userId, displayName: "Sarah", primaryEmail: "sarah@example.com"),
+                    households: [],
+                    pendingJoinRequests: [pending]
+                )
+            }
+        }
+
+        let store = BlythesLifeStore(storage: storage, apiClient: mockAPI, tokenStore: tokenStore)
+        try await store.completeAppleSignIn(identityToken: "jwt", rawNonce: "nonce")
+        #expect(store.sessionStage == .awaitingApproval)
+        #expect(store.hasCompletedHouseholdSetup == false)
+        #expect(store.pendingJoinRequest == pending)
+    }
+
+    @Test("Owner approveJoinRequestAsync, declineJoinRequestAsync, removeHouseholdMemberAsync, and SSE refresh hit exact endpoints")
+    func ownerApprovalDeclineMemberRemovalAndSSERefresh() async throws {
+        let mockAPI = MockBackendAPI()
+        let tokenStore = InMemoryAuthTokenStorage(
+            initialTokens: StoredAuthTokens(
+                accessToken: "owner-token",
+                refreshToken: "rt-owner",
+                deviceId: "dev-owner-mgmt"
+            )
+        )
+        let store = BlythesLifeStore.makeDemo(apiClient: mockAPI, tokenStore: tokenStore)
+        let householdId = store.household.id
+        let approveReqId = UUID()
+        let declineReqId = UUID()
+        let newMemberId = UUID()
+        let removedUserId = SampleSeedData.grandmaUserId
+
+        let pendingApprove = HouseholdJoinRequestDTO(
+            id: approveReqId,
+            householdId: householdId,
+            householdName: "Blythe's household",
+            userId: newMemberId,
+            displayName: "Aunt Maya",
+            requestedRole: .caregiver,
+            status: .pending
+        )
+        let pendingDecline = HouseholdJoinRequestDTO(
+            id: declineReqId,
+            householdId: householdId,
+            householdName: "Blythe's household",
+            userId: UUID(),
+            displayName: "Unknown",
+            requestedRole: .caregiver,
+            status: .pending
+        )
+
+        store.household.pendingJoinRequests = [pendingApprove, pendingDecline]
+        #expect(store.isCurrentUserHouseholdOwner == true)
+        #expect(store.pendingHouseholdJoinRequests.count == 2)
+
+        let afterApprove = HouseholdDTO(
+            id: householdId,
+            name: "Blythe's household",
+            createdBy: SampleSeedData.ownerUserId,
+            role: .owner,
+            members: [
+                HouseholdMemberDTO(householdId: householdId, userId: SampleSeedData.ownerUserId, role: .owner, displayName: "Brian"),
+                HouseholdMemberDTO(householdId: householdId, userId: SampleSeedData.grandmaUserId, role: .caregiver, displayName: "Grandma"),
+                HouseholdMemberDTO(householdId: householdId, userId: newMemberId, role: .caregiver, displayName: "Aunt Maya")
+            ],
+            activeInvites: [],
+            pendingJoinRequests: [pendingDecline]
+        )
+        let afterDecline = HouseholdDTO(
+            id: householdId,
+            name: "Blythe's household",
+            createdBy: SampleSeedData.ownerUserId,
+            role: .owner,
+            members: afterApprove.members,
+            activeInvites: [],
+            pendingJoinRequests: []
+        )
+        let afterRemove = HouseholdDTO(
+            id: householdId,
+            name: "Blythe's household",
+            createdBy: SampleSeedData.ownerUserId,
+            role: .owner,
+            members: [
+                HouseholdMemberDTO(householdId: householdId, userId: SampleSeedData.ownerUserId, role: .owner, displayName: "Brian"),
+                HouseholdMemberDTO(householdId: householdId, userId: newMemberId, role: .caregiver, displayName: "Aunt Maya")
+            ],
+            activeInvites: [],
+            pendingJoinRequests: []
+        )
+        let incomingReq = HouseholdJoinRequestDTO(
+            id: UUID(),
+            householdId: householdId,
+            householdName: "Blythe's household",
+            userId: UUID(),
+            displayName: "Uncle Leo",
+            requestedRole: .caregiver,
+            status: .pending
+        )
+        let afterSSE = HouseholdDTO(
+            id: householdId,
+            name: "Blythe's household",
+            createdBy: SampleSeedData.ownerUserId,
+            role: .owner,
+            members: afterRemove.members,
+            activeInvites: [],
+            pendingJoinRequests: [incomingReq]
+        )
+
+        mockAPI.state.withLock { state in
+            state.approveJoinRequestHandler = { hid, rid, _ in
+                #expect(hid == householdId)
+                #expect(rid == approveReqId)
+                return afterApprove
+            }
+            state.declineJoinRequestHandler = { hid, rid, _ in
+                #expect(hid == householdId)
+                #expect(rid == declineReqId)
+                return afterDecline
+            }
+            state.removeHouseholdMemberHandler = { hid, uid, _ in
+                #expect(hid == householdId)
+                #expect(uid == removedUserId)
+                return afterRemove
+            }
+            state.listHouseholdsHandler = { _ in [afterSSE] }
+            state.syncStreamHandler = { _ in
+                AsyncThrowingStream { continuation in
+                    continuation.yield(
+                        SyncStreamNotification(
+                            householdId: householdId,
+                            profileId: nil,
+                            entityType: "household_join_requests",
+                            entityId: incomingReq.id,
+                            updatedAt: Date()
+                        )
+                    )
+                    continuation.finish()
+                }
+            }
+        }
+
+        try await store.approveJoinRequestAsync(requestId: approveReqId)
+        #expect(store.household.members?.contains(where: { $0.userId == newMemberId }) == true)
+        #expect(store.pendingHouseholdJoinRequests.count == 1)
+        #expect(store.toast?.message == "Aunt Maya joined the household")
+
+        try await store.declineJoinRequestAsync(requestId: declineReqId)
+        #expect(store.pendingHouseholdJoinRequests.isEmpty)
+        #expect(store.toast?.message == "Request declined")
+
+        try await store.removeHouseholdMemberAsync(userId: removedUserId)
+        #expect(store.household.members?.contains(where: { $0.userId == removedUserId }) == false)
+        #expect(store.toast?.message == "Member removed")
+
+        // Verify SSE notification with entityType "household_join_requests" calls refreshHouseholdAsync()
+        store.startRealtimeSync()
+        defer { store.stopRealtimeSync() }
+        for _ in 0 ..< 40 where store.pendingHouseholdJoinRequests.isEmpty {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(store.pendingHouseholdJoinRequests.first?.id == incomingReq.id)
+
+        let calls = mockAPI.state.withLock { $0.recordedCalls }
+        #expect(
+            calls.contains(
+                "POST /v1/households/\(householdId.uuidString.lowercased())/join-requests/\(approveReqId.uuidString.lowercased())/approve"
+            )
+        )
+        #expect(
+            calls.contains(
+                "POST /v1/households/\(householdId.uuidString.lowercased())/join-requests/\(declineReqId.uuidString.lowercased())/decline"
+            )
+        )
+        #expect(
+            calls.contains(
+                "DELETE /v1/households/\(householdId.uuidString.lowercased())/members/\(removedUserId.uuidString.lowercased())"
+            )
+        )
+        #expect(calls.contains("GET /v1/households"))
+    }
 }
 
 // MARK: - URLSessionBackendAPIClient Exact Route Verification
@@ -1816,10 +2471,32 @@ struct URLSessionBackendAPIClientRouteTests {
     @Test("Every endpoint hits the exact live backend path and HTTP method")
     func verifiesExactLiveBackendRoutes() async throws {
         let householdId = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let inviteId = UUID(uuidString: "22222222-3333-4444-5555-666666666666")!
+        let joinRequestId = UUID(uuidString: "33333333-4444-5555-6666-777777777777")!
+        let removedUserId = UUID(uuidString: "44444444-5555-6666-7777-888888888888")!
         let profileId = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
         let scanId = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
         let user = UserDTO(id: SampleSeedData.ownerUserId, displayName: "Brian", primaryEmail: "brian@icloud.com")
         let household = HouseholdDTO(id: householdId, name: "Blythe's household", inviteCode: "123456", createdBy: user.id)
+        let invite = HouseholdInviteDTO(
+            id: inviteId,
+            householdId: householdId,
+            code: "K7M9P4X2",
+            label: "Grandma",
+            role: .caregiver,
+            createdBy: user.id,
+            expiresAt: Date().addingTimeInterval(24 * 3600)
+        )
+        let joinRequest = HouseholdJoinRequestDTO(
+            id: joinRequestId,
+            householdId: householdId,
+            householdName: "Blythe's household",
+            inviteId: inviteId,
+            userId: removedUserId,
+            displayName: "Grandma",
+            requestedRole: .caregiver,
+            status: .pending
+        )
         let profile = ProfileDTO(id: profileId, householdId: householdId, displayName: "Blythe")
         let scan = PaperScanDTO(
             id: scanId,
@@ -1861,8 +2538,18 @@ struct URLSessionBackendAPIClientRouteTests {
                 return (200, try! encoder.encode(payload), ["Content-Type": "application/json"])
             case ("GET", "/v1/households"):
                 return (200, try! encoder.encode([household]), ["Content-Type": "application/json"])
+            case ("POST", "/v1/households/\(householdId.uuidString.lowercased())/invites"):
+                return (201, try! encoder.encode(invite), ["Content-Type": "application/json"])
+            case ("POST", "/v1/households/join"):
+                let payload = JoinHouseholdResponse(status: .pending, household: nil, joinRequest: joinRequest)
+                return (202, try! encoder.encode(payload), ["Content-Type": "application/json"])
+            case ("GET", "/v1/households/join-requests/mine"):
+                return (200, try! encoder.encode([joinRequest]), ["Content-Type": "application/json"])
             case ("POST", "/v1/households"),
-                 ("POST", "/v1/households/join"),
+                 ("DELETE", "/v1/households/\(householdId.uuidString.lowercased())/invites/\(inviteId.uuidString.lowercased())"),
+                 ("POST", "/v1/households/\(householdId.uuidString.lowercased())/join-requests/\(joinRequestId.uuidString.lowercased())/approve"),
+                 ("POST", "/v1/households/\(householdId.uuidString.lowercased())/join-requests/\(joinRequestId.uuidString.lowercased())/decline"),
+                 ("DELETE", "/v1/households/\(householdId.uuidString.lowercased())/members/\(removedUserId.uuidString.lowercased())"),
                  ("POST", "/v1/households/\(householdId.uuidString.lowercased())/invite"):
                 return (200, try! encoder.encode(household), ["Content-Type": "application/json"])
             case ("GET", "/v1/profiles"):
@@ -1917,7 +2604,24 @@ struct URLSessionBackendAPIClientRouteTests {
 
         _ = try await client.listHouseholds(accessToken: token)
         _ = try await client.createHousehold(name: "Test", accessToken: token)
-        _ = try await client.joinHousehold(inviteCode: "123456", displayName: "Sarah", accessToken: token)
+        let createdInvite = try await client.createHouseholdInvite(
+            householdId: householdId,
+            CreateHouseholdInviteRequest(label: "Grandma", role: .caregiver, ttlHours: 24),
+            accessToken: token
+        )
+        #expect(createdInvite.id == inviteId)
+        _ = try await client.revokeHouseholdInvite(householdId: householdId, inviteId: inviteId, accessToken: token)
+        let joinResp = try await client.joinHousehold(
+            JoinHouseholdRequest(inviteCode: "K7M9P4X2", displayName: "Grandma"),
+            accessToken: token
+        )
+        #expect(joinResp.status == .pending)
+        #expect(joinResp.joinRequest?.id == joinRequestId)
+        let myJoinReqs = try await client.listMyJoinRequests(accessToken: token)
+        #expect(myJoinReqs.count == 1)
+        _ = try await client.approveJoinRequest(householdId: householdId, requestId: joinRequestId, accessToken: token)
+        _ = try await client.declineJoinRequest(householdId: householdId, requestId: joinRequestId, accessToken: token)
+        _ = try await client.removeHouseholdMember(householdId: householdId, userId: removedUserId, accessToken: token)
         _ = try await client.rotateInviteCode(householdId: householdId, accessToken: token)
 
         _ = try await client.listProfiles(accessToken: token)
@@ -1950,7 +2654,13 @@ struct URLSessionBackendAPIClientRouteTests {
             "DELETE /v1/account",
             "GET /v1/households",
             "POST /v1/households",
+            "POST /v1/households/\(householdId.uuidString.lowercased())/invites",
+            "DELETE /v1/households/\(householdId.uuidString.lowercased())/invites/\(inviteId.uuidString.lowercased())",
             "POST /v1/households/join",
+            "GET /v1/households/join-requests/mine",
+            "POST /v1/households/\(householdId.uuidString.lowercased())/join-requests/\(joinRequestId.uuidString.lowercased())/approve",
+            "POST /v1/households/\(householdId.uuidString.lowercased())/join-requests/\(joinRequestId.uuidString.lowercased())/decline",
+            "DELETE /v1/households/\(householdId.uuidString.lowercased())/members/\(removedUserId.uuidString.lowercased())",
             "POST /v1/households/\(householdId.uuidString.lowercased())/invite",
             "GET /v1/profiles",
             "POST /v1/profiles",
@@ -2101,11 +2811,13 @@ struct PortabilityAndInfrastructureTests {
         var jsonObj = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         jsonObj.removeValue(forKey: "hasCompletedHouseholdSetup")
         jsonObj.removeValue(forKey: "isDemoPreview")
+        jsonObj.removeValue(forKey: "pendingJoinRequest")
         let legacyData = try JSONSerialization.data(withJSONObject: jsonObj)
 
         let decoded = try BlythesLifeJSONCoding.makeDecoder().decode(PersistedAppState.self, from: legacyData)
         #expect(decoded.hasCompletedHouseholdSetup == true)
         #expect(decoded.isDemoPreview == false)
+        #expect(decoded.pendingJoinRequest == nil)
         #expect(decoded.profile.id == seed.profile.id)
         #expect(decoded.household.id == seed.household.id)
     }

@@ -11,9 +11,6 @@ a{color:var(--honey-700)}a:hover{color:var(--honey-800)}
 .frame{width:1024px;height:1024px;line-height:0}
 .frame canvas{display:block;width:1024px;height:1024px}
 #icon-foreground{background:repeating-conic-gradient(var(--paper-300) 0 25%,var(--paper-0) 0 50%) 0 0/32px 32px}
-#m{position:absolute;left:0;top:0;visibility:hidden;width:1024px;height:1024px;font-size:102.4px;display:flex;align-items:center;justify-content:center}
-#mb{display:block;padding:0 .12em;font:500 6.6em/.86 var(--font-display);border-bottom:.022em solid}
-#mz{display:inline-block;width:0;height:0}
 </style>
 </head>
 <body>
@@ -22,39 +19,31 @@ a{color:var(--honey-700)}a:hover{color:var(--honey-800)}
 <div class="row"><span class="bl-label">Dark · 1024 × 1024</span><div class="frame" id="icon-dark"><canvas width="1024" height="1024"></canvas></div></div>
 <div class="row"><span class="bl-label">Tinted · 1024 × 1024</span><div class="frame" id="icon-tinted"><canvas width="1024" height="1024"></canvas></div></div>
 <div class="row"><span class="bl-label">Foreground layer · transparent</span><div class="frame" id="icon-foreground"><canvas width="1024" height="1024"></canvas></div></div>
-<div id="m"><b id="mb"><span id="mt">B</span><span id="mz"></span></b></div>
 <script>
-// Geometry is measured from the same CSS that draws option 1a, then painted to canvas at 1024px.
-(async function () {
+// Option 2a (Bottle) in colourway 3d (Lavender). Geometry matches brand/App Icon Options.html:
+// [x, y, width, height, corner radii] in tenths of the icon width.
+(function () {
   const css = getComputedStyle(document.documentElement);
   const tok = n => css.getPropertyValue(n).trim();
-  await document.fonts.load('500 676px Newsreader', 'B');
-  await document.fonts.ready;
-  const ok = document.fonts.check('500 676px Newsreader', 'B');
-  const r = document.getElementById('m').getBoundingClientRect();
-  const mb = document.getElementById('mb'), bb = mb.getBoundingClientRect();
-  const cs = getComputedStyle(mb), bw = parseFloat(cs.borderBottomWidth);
-  const g = {
-    fs: parseFloat(cs.fontSize),
-    tx: document.getElementById('mt').getBoundingClientRect().left - r.left,
-    base: document.getElementById('mz').getBoundingClientRect().bottom - r.top,
-    rx: bb.left - r.left, ry: bb.bottom - r.top - bw, rw: bb.width, rh: bw,
-  };
-  function draw(id, bg, fg) {
+  const U = 102.4;
+  const BOTTLE = [[4.55, 1.5, .9, 1.3, [.45]], [3.75, 2.3, 2.5, 1.25, [1.25, 1.25, 0, 0]], [3.05, 3.55, 3.9, .8, [.25]], [3.2, 4.57, 3.6, 4.03, [.5, .5, 1.1, 1.1]]];
+  const MARKS = [[4.9, 5.35, 1.4, .28, [.14]], [5.4, 6.25, .9, .28, [.14]], [4.9, 7.15, 1.4, .28, [.14]]];
+  function fill(x, list, color) {
+    x.fillStyle = color;
+    list.forEach(s => { x.beginPath(); x.roundRect(s[0] * U, s[1] * U, s[2] * U, s[3] * U, s[4].map(r => r * U)); x.fill(); });
+  }
+  function draw(id, bg, fg, hi) {
     const x = document.querySelector('#' + id + ' canvas').getContext('2d');
     x.clearRect(0, 0, 1024, 1024);
     if (bg) { x.fillStyle = bg; x.fillRect(0, 0, 1024, 1024); }
-    x.fillStyle = fg;
-    x.font = '500 ' + g.fs + 'px Newsreader, Georgia, serif';
-    x.textBaseline = 'alphabetic';
-    x.fillText('B', g.tx, g.base);
-    x.fillRect(g.rx, g.ry, g.rw, g.rh);
+    fill(x, BOTTLE, fg);
+    fill(x, MARKS, hi);
   }
-  draw('icon-light', tok('--honey-400'), tok('--paper-900'));
-  draw('icon-dark', '#000', tok('--honey-400'));
-  draw('icon-tinted', '#000', '#e6e6e6');
-  draw('icon-foreground', null, tok('--paper-900'));
-  document.getElementById('status').textContent = ok ? 'Ready. Newsreader loaded.' : 'Newsreader did not load. Do not export.';
+  draw('icon-light', tok('--sleep-100'), tok('--sleep-700'), tok('--honey-300'));
+  draw('icon-dark', '#000', tok('--sleep-300'), '#000');
+  draw('icon-tinted', '#000', '#e6e6e6', '#000');
+  draw('icon-foreground', null, tok('--sleep-700'), tok('--honey-300'));
+  document.getElementById('status').textContent = 'Ready.';
 })();
 </script>
 </body>

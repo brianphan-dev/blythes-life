@@ -8,7 +8,7 @@
 <style>
 body{margin:0;font-family:var(--font-ui);color:var(--paper-900)}
 a{color:var(--honey-700)}a:hover{color:var(--honey-800)}
-.opt{position:absolute;top:48px;width:288px;box-sizing:border-box;padding:24px;display:flex;flex-direction:column;gap:16px;background:var(--paper-0);border:1px solid var(--paper-200);border-radius:16px}
+.opt{position:absolute;top:92px;width:288px;box-sizing:border-box;padding:24px;display:flex;flex-direction:column;gap:16px;background:var(--paper-0);border:1px solid var(--paper-200);border-radius:16px}
 .opt h2{display:flex;align-items:center;gap:10px;margin:0;font:500 24px/30px var(--font-display)}
 .tag{display:inline-grid;place-items:center;height:22px;padding:0 7px;border-radius:6px;background:var(--paper-900);color:var(--paper-50);font:600 12px/1 var(--font-ui);letter-spacing:.04em}
 .opt p{margin:0;font:400 14px/20px var(--font-ui);color:var(--paper-600);text-wrap:pretty}
@@ -53,34 +53,156 @@ a{color:var(--honey-700)}a:hover{color:var(--honey-800)}
 .i-e .cols i:nth-child(3){background:linear-gradient(to bottom,var(--v) 0 20%,var(--p) 20% 34%,var(--v) 34% 47%,var(--p) 47% 63%,var(--v) 63% 72%,var(--p) 72% 91%,var(--v) 91% 100%)}
 .i-e .cols i:nth-child(4){background:linear-gradient(to bottom,var(--v) 0 23%,var(--p) 23% 37%,var(--v) 37% 48%,var(--p) 48% 100%)}
 .i-e .now{left:1.4em;right:1.4em;top:5.3em;height:.24em;border-radius:.12em;background:var(--now)}
+.opt.r1{top:1610px}.opt.r2{top:946px}
+.round{position:absolute;left:48px;margin:0;font:var(--type-micro);letter-spacing:var(--tracking-micro);text-transform:uppercase;color:var(--paper-600);white-space:nowrap}
+
+/* Round 2 shares the 1a palette: honey ground, ink mark, cream detail */
+.fam{--bg:var(--honey-400);--fg:var(--paper-900);--hi:var(--paper-0)}
+.dark .fam{--bg:#000;--fg:var(--honey-400);--hi:#000}
+.fam i{background:var(--fg)}
+
+.i-f .tip{left:4.55em;top:1.5em;width:.9em;height:1.3em;border-radius:.45em}
+.i-f .dome{left:3.75em;top:2.3em;width:2.5em;height:1.25em;border-radius:1.25em 1.25em 0 0}
+.i-f .collar{left:3.05em;top:3.55em;width:3.9em;height:.8em;border-radius:.25em}
+.i-f .body{left:3.2em;top:4.57em;width:3.6em;height:4.03em;border-radius:.5em .5em 1.1em 1.1em}
+.i-f .tk{right:3.7em;height:.28em;border-radius:.14em;background:var(--hi)}
+
+.i-g .bar{top:2.4em;width:.62em;height:5.2em;border-radius:.31em}
+.i-g .slash{left:1.3em;top:4.69em;width:7.4em;height:.62em;border-radius:.31em;box-shadow:0 0 0 .2em var(--bg);transform:rotate(-24deg)}
+
+.i-h .sq{left:3.15em;top:3.47em;width:3.7em;height:3.7em;border-radius:0 0 .4em 0;transform:rotate(45deg)}
+.i-h .c1,.i-h .c2{top:2.162em;width:3.7em;height:3.7em;border-radius:50%}
+.i-h .c1{left:1.842em}.i-h .c2{left:4.458em}
+.i-h .ck{left:4.15em;top:2.7em;width:1.2em;height:2.4em;box-sizing:content-box;background:none;border:solid var(--hi);border-width:0 .52em .52em 0;transform:rotate(45deg)}
+
+.i-j .pg{position:absolute;left:2.5em;top:1.6em;width:5em;height:6.8em;border-radius:.6em;background:var(--fg)}
+.i-j .moon{left:1.2em;top:.8em;width:2.6em;height:2.6em;border-radius:50%;background:var(--bg)}
+.i-j .cut{left:2em;top:.45em;width:2.3em;height:2.3em;border-radius:50%}
+.i-j .ln{left:.9em;height:.34em;border-radius:.17em;background:var(--hi)}
+
+.i-k .cap{left:3.95em;top:1.25em;width:2.1em;height:.6em;border-radius:.3em}
+.i-k .stem{left:4.6em;top:1.65em;width:.8em;height:1.3em}
+.i-k .disc{left:2em;top:2.75em;width:6em;height:6em;border-radius:50%}
+.i-k .face{left:2.8em;top:3.55em;width:4.4em;height:4.4em;border-radius:50%;background:conic-gradient(var(--hi) 0 34%,transparent 34% 100%)}
+
+/* Round 3: colourways. Icons are cloned from rounds 1 and 2 and recoloured through --bg / --fg / --hi */
+.opt.r3{width:684px}
+.row{display:flex;gap:12px;align-items:center}
+.r3 .row .ic{font-size:9.6px}
+.row.dk{padding:12px;border-radius:12px;background:var(--paper-950)}
+.r3 .row.dk .ic{font-size:4.8px;box-shadow:0 0 0 1px var(--night-400)}
+.row.dk span{margin-left:auto;font:600 11px/14px var(--font-ui);letter-spacing:.08em;text-transform:uppercase;color:var(--night-600)}
+.ids{display:flex;gap:12px;margin-top:-8px;font:600 11px/14px var(--font-ui);letter-spacing:.04em;color:var(--paper-500)}
+.ids span{width:96px;text-align:center}
+.cw-paper .ic{--bg:var(--paper-50);--fg:var(--paper-900);--hi:var(--honey-400)}.cw-paper .dk .ic{--bg:#000;--fg:var(--night-700);--hi:#000}
+.cw-clay .ic{--bg:var(--feeding-700);--fg:var(--paper-50);--hi:var(--feeding-700)}.cw-clay .dk .ic{--bg:#000;--fg:var(--feeding-300);--hi:#000}
+.cw-night .ic{--bg:var(--sleep-700);--fg:var(--honey-300);--hi:var(--sleep-700)}.cw-night .dk .ic{--bg:#000;--fg:var(--honey-400);--hi:#000}
+.cw-lavender .ic{--bg:var(--sleep-100);--fg:var(--sleep-700);--hi:var(--honey-300)}.cw-lavender .dk .ic{--bg:#000;--fg:var(--sleep-300);--hi:#000}
+.cw-sea .ic{--bg:var(--diaper-700);--fg:var(--paper-50);--hi:var(--diaper-700)}.cw-sea .dk .ic{--bg:#000;--fg:var(--diaper-300);--hi:#000}
+.cw-blush .ic{--bg:var(--medicine-100);--fg:var(--medicine-700);--hi:var(--medicine-100)}.cw-blush .dk .ic{--bg:#000;--fg:var(--medicine-300);--hi:#000}
 </style>
 </head>
 <body>
-<section class="opt" id="1a" data-screen-label="1a Monogram" style="left:48px">
+<p class="round" style="top:56px">Round 3 · Six colourways on the round 1 and 2 shapes · chosen: 2a Bottle in 3d Lavender</p>
+<section class="opt r3 cw-paper" id="3a" data-screen-label="3a Paper" style="left:48px;top:92px">
+<h2><span class="tag">3a</span>Paper</h2>
+<div class="row"></div>
+<div class="ids"><span>1a</span><span>2a</span><span>2b</span><span>2c</span><span>2d</span><span>2e</span></div>
+<div class="row dk"><span>Dark</span></div>
+<p>Ink on cream with honey details. The quietest, and the closest to the paper log.</p>
+</section>
+<section class="opt r3 cw-clay" id="3b" data-screen-label="3b Clay" style="left:764px;top:92px">
+<h2><span class="tag">3b</span>Clay</h2>
+<div class="row"></div>
+<div class="ids"><span>1a</span><span>2a</span><span>2b</span><span>2c</span><span>2d</span><span>2e</span></div>
+<div class="row dk"><span>Dark</span></div>
+<p>Cream on terracotta, taken from the feeding colour. The warmest of the six.</p>
+</section>
+<section class="opt r3 cw-night" id="3c" data-screen-label="3c Night" style="left:1480px;top:92px">
+<h2><span class="tag">3c</span>Night</h2>
+<div class="row"></div>
+<div class="ids"><span>1a</span><span>2a</span><span>2b</span><span>2c</span><span>2d</span><span>2e</span></div>
+<div class="row dk"><span>Dark</span></div>
+<p>Honey on sleep violet. Calm, and reads as a night-time app.</p>
+</section>
+<section class="opt r3 cw-lavender" id="3d" data-screen-label="3d Lavender" style="left:48px;top:488px">
+<h2><span class="tag">3d</span>Lavender</h2>
+<div class="row"></div>
+<div class="ids"><span>1a</span><span>2a</span><span>2b</span><span>2c</span><span>2d</span><span>2e</span></div>
+<div class="row dk"><span>Dark</span></div>
+<p>Violet on pale lavender with honey details. Soft; lower contrast than the dark grounds.</p>
+</section>
+<section class="opt r3 cw-sea" id="3e" data-screen-label="3e Sea" style="left:764px;top:488px">
+<h2><span class="tag">3e</span>Sea</h2>
+<div class="row"></div>
+<div class="ids"><span>1a</span><span>2a</span><span>2b</span><span>2c</span><span>2d</span><span>2e</span></div>
+<div class="row dk"><span>Dark</span></div>
+<p>Cream on deep teal, taken from the diaper colour. Cool and calm; furthest from the honey accent.</p>
+</section>
+<section class="opt r3 cw-blush" id="3f" data-screen-label="3f Blush" style="left:1480px;top:488px">
+<h2><span class="tag">3f</span>Blush</h2>
+<div class="row"></div>
+<div class="ids"><span>1a</span><span>2a</span><span>2b</span><span>2c</span><span>2d</span><span>2e</span></div>
+<div class="row dk"><span>Dark</span></div>
+<p>Berry on pale pink, taken from the meds colour. The most conventional baby-app palette.</p>
+</section>
+<p class="round" style="top:910px">Round 2 · Silhouettes that signal logging or care · same palette as 1a, so only the shape differs</p>
+<section class="opt r2" id="2a" data-screen-label="2a Bottle" style="left:48px">
+<h2><span class="tag">2a</span>Bottle</h2>
+<div class="ic fam i-f"><i class="tip"></i><i class="dome"></i><i class="collar"></i><i class="body"></i><i class="tk" style="top:5.35em;width:1.4em"></i><i class="tk" style="top:6.25em;width:.9em"></i><i class="tk" style="top:7.15em;width:1.4em"></i></div>
+<div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
+<p>A bottle with measure marks: feeding, measured. The most literal of the five.</p>
+</section>
+<section class="opt r2" id="2b" data-screen-label="2b Tally" style="left:368px">
+<h2><span class="tag">2b</span>Tally</h2>
+<div class="ic fam i-g"><i class="bar" style="left:2.59em;transform:rotate(-2deg)"></i><i class="bar" style="left:3.99em;transform:rotate(1.5deg)"></i><i class="bar" style="left:5.39em;transform:rotate(-1deg)"></i><i class="bar" style="left:6.79em;transform:rotate(2deg)"></i><i class="slash"></i></div>
+<div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
+<p>Four strokes and a slash, as if pencilled on the paper log. Says "keeping count" with no baby imagery.</p>
+</section>
+<section class="opt r2" id="2c" data-screen-label="2c Heart check" style="left:688px">
+<h2><span class="tag">2c</span>Heart check</h2>
+<div class="ic fam i-h"><i class="c1"></i><i class="c2"></i><i class="sq"></i><i class="ck"></i></div>
+<div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
+<p>A heart with a check inside: care, done. The warmest option, and the closest to a health app.</p>
+</section>
+<section class="opt r2" id="2d" data-screen-label="2d Night log" style="left:1008px">
+<h2><span class="tag">2d</span>Night log</h2>
+<div class="ic fam i-j"><div class="pg"><i class="moon"></i><i class="cut"></i><i class="ln" style="top:4.15em;width:3.2em"></i><i class="ln" style="top:5em;width:3.2em"></i><i class="ln" style="top:5.85em;width:2em"></i></div></div>
+<div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
+<p>A log page with a crescent cut into it. Ties the paper sheet to the 3 AM use.</p>
+</section>
+<section class="opt r2" id="2e" data-screen-label="2e Timer" style="left:1328px">
+<h2><span class="tag">2e</span>Timer</h2>
+<div class="ic fam i-k"><i class="cap"></i><i class="stem"></i><i class="disc"></i><i class="face"></i></div>
+<div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
+<p>A stopwatch part-way through, for the nap and nursing timers. Says the most about logging and the least about care.</p>
+</section>
+<p class="round" style="top:1574px">Round 1</p>
+<section class="opt r1" id="1a" data-screen-label="1a Monogram" style="left:48px">
 <h2><span class="tag">1a</span>Monogram</h2>
 <div class="ic i-a"><b>B</b></div>
 <div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
 <p>The B from the wordmark on a ruled line, like a filled-in field on the paper log.</p>
 </section>
-<section class="opt" id="1b" data-screen-label="1b The sheet" style="left:368px">
+<section class="opt r1" id="1b" data-screen-label="1b The sheet" style="left:368px">
 <h2><span class="tag">1b</span>The sheet</h2>
 <div class="ic i-b"><div class="pg"><i style="top:.56em;width:2.6em"></i><i style="top:1.96em;width:3.6em"></i><i class="hl"></i><i class="mk" style="top:3.36em;width:2.2em"></i><i style="top:4.76em;width:3.1em"></i></div></div>
 <div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
 <p>Grandma's paper sheet with one line picked out for review. Leads with the photo-to-log scan.</p>
 </section>
-<section class="opt" id="1c" data-screen-label="1c Sweet spot" style="left:688px">
+<section class="opt r1" id="1c" data-screen-label="1c Sweet spot" style="left:688px">
 <h2><span class="tag">1c</span>Sweet spot</h2>
 <div class="ic i-c"><i class="ring"></i><i class="hole"></i><i class="tick"></i></div>
 <div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
 <p>The nap card's wake-window rail bent into a ring. The tick marks the sweet spot.</p>
 </section>
-<section class="opt" id="1d" data-screen-label="1d Night light" style="left:1008px">
+<section class="opt r1" id="1d" data-screen-label="1d Night light" style="left:1008px">
 <h2><span class="tag">1d</span>Night light</h2>
 <div class="ic i-d"><i class="moon"></i><i class="cut"></i><i class="line"></i></div>
 <div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
 <p>A honey crescent on sleep violet, resting on a ruled line. Reads as a calm 3 AM app.</p>
 </section>
-<section class="opt" id="1e" data-screen-label="1e Rhythm" style="left:1328px">
+<section class="opt r1" id="1e" data-screen-label="1e Rhythm" style="left:1328px">
 <h2><span class="tag">1e</span>Rhythm</h2>
 <div class="ic i-e"><div class="cols"><i></i><i></i><i></i><i></i></div><i class="now"></i></div>
 <div class="pair"><div class="slot"><span>Default</span></div><div class="slot dark"><span>Dark</span></div></div>
@@ -92,6 +214,16 @@ document.querySelectorAll('.opt').forEach(function (o) {
   var ic = o.querySelector('.ic');
   o.querySelectorAll('.slot').forEach(function (s) { s.appendChild(ic.cloneNode(true)); });
 });
+</script>
+<script>
+// Round 3 rows are filled with copies of the round 1 and 2 icons.
+(function () {
+  var src = ["1a","2a","2b","2c","2d","2e"].map(function (id) { return document.getElementById(id).querySelector('.ic'); });
+  document.querySelectorAll('.r3 .row').forEach(function (row) {
+    var label = row.querySelector('span');
+    src.forEach(function (ic) { row.insertBefore(ic.cloneNode(true), label); });
+  });
+})();
 </script>
 </body>
 </html>

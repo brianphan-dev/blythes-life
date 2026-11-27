@@ -631,6 +631,12 @@ struct ModelCodingTests {
         #expect(decoded.backupCatnapDurationMinutes == 25)
         #expect(decoded.targetDailyMilkOzMin == nil)
         #expect(decoded.targetDailyMilkOzMax == nil)
+        #expect(decoded.targetBedtimeMinutesFromMidnight == 1170)
+        #expect(decoded.bedtimeWakeWindowMinutes == 225)
+        #expect(decoded.nightWindowStartMinutesFromMidnight == 1125)
+        #expect(decoded.feedingIntervalMinutes == 180)
+        #expect(decoded.mealTargetMinutesFromMidnight == [510, 750, 1050])
+        #expect(decoded.minMinutesAfterFeedForMeal == 45)
 
         #expect(ScheduleConfig.defaultWakeWindows(forNapCount: -2) == [300])
         #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 0) == [300])
@@ -640,6 +646,100 @@ struct ModelCodingTests {
         #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 4) == [75, 90, 90, 105])
         #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 5) == [75, 90, 90, 105])
         #expect(ScheduleConfig.defaultWakeWindows(forNapCount: 99) == [75, 90, 90, 105])
+
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: -1) == 315)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 0) == 315)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 1) == 315)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 2) == 225)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 3) == 165)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 4) == 120)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 5) == 120)
+        #expect(ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: 99) == 120)
+
+        // Initializer derives bedtimeWakeWindowMinutes from wakeWindowsMinutes.count when omitted
+        #expect(ScheduleConfig(wakeWindowsMinutes: [300]).bedtimeWakeWindowMinutes == 315)
+        #expect(ScheduleConfig(wakeWindowsMinutes: [150, 195]).bedtimeWakeWindowMinutes == 225)
+        #expect(ScheduleConfig(wakeWindowsMinutes: [105, 135, 150]).bedtimeWakeWindowMinutes == 165)
+        #expect(ScheduleConfig(wakeWindowsMinutes: [75, 90, 90, 105]).bedtimeWakeWindowMinutes == 120)
+
+        #expect(ScheduleConfig.defaultMealTargets(forMealCount: -1) == [1050])
+        #expect(ScheduleConfig.defaultMealTargets(forMealCount: 0) == [1050])
+        #expect(ScheduleConfig.defaultMealTargets(forMealCount: 1) == [1050])
+        #expect(ScheduleConfig.defaultMealTargets(forMealCount: 2) == [720, 1050])
+        #expect(ScheduleConfig.defaultMealTargets(forMealCount: 3) == [510, 750, 1050])
+        #expect(ScheduleConfig.defaultMealTargets(forMealCount: 4) == [510, 750, 1050])
+    }
+
+    @Test("ScheduleConfig legacy JSON migrates bedtime_window_start_minutes_from_midnight and full config round-trips")
+    func scheduleConfigLegacyCompatibilityAndRoundTrip() throws {
+        // Legacy JSON with no bedtime fields -> defaults to 7:30 PM (1170) and derives bedtime wake window from nap count
+        let legacyNoBedtimeJSON = """
+        {
+          "wake_windows_minutes": [105, 135, 150],
+          "nap_cap_minutes": 90,
+          "short_nap_threshold_minutes": 45,
+          "short_nap_next_window_minutes": 150,
+          "backup_catnap_cutoff_minutes_from_midnight": 1020,
+          "backup_catnap_duration_minutes": 25,
+          "target_daily_milk_oz_min": 22.0,
+          "target_daily_milk_oz_max": 30.0
+        }
+        """
+        let decodedLegacy = try decoder.decode(ScheduleConfig.self, from: Data(legacyNoBedtimeJSON.utf8))
+        #expect(decodedLegacy.wakeWindowsMinutes == [105, 135, 150])
+        #expect(decodedLegacy.targetDailyMilkOzMin == 22.0)
+        #expect(decodedLegacy.targetDailyMilkOzMax == 30.0)
+        #expect(decodedLegacy.targetBedtimeMinutesFromMidnight == ScheduleConfig.defaultTargetBedtimeMinutesFromMidnight)
+        #expect(decodedLegacy.bedtimeWakeWindowMinutes == 165)
+        #expect(decodedLegacy.nightWindowStartMinutesFromMidnight == 1125)
+        #expect(decodedLegacy.feedingIntervalMinutes == ScheduleConfig.defaultFeedingIntervalMinutes)
+        #expect(decodedLegacy.mealTargetMinutesFromMidnight == ScheduleConfig.defaultMealTargetMinutesFromMidnight)
+        #expect(decodedLegacy.minMinutesAfterFeedForMeal == ScheduleConfig.defaultMinMinutesAfterFeedForMeal)
+
+        // Legacy JSON with bedtime_window_start_minutes_from_midnight migrates by +45m, clamped to 1050...1380
+        let legacyBedtimeJSON = Data(#"{"bedtime_window_start_minutes_from_midnight":1110}"#.utf8)
+        let migratedBedtime = try decoder.decode(ScheduleConfig.self, from: legacyBedtimeJSON)
+        #expect(migratedBedtime.targetBedtimeMinutesFromMidnight == 1155) // 6:30 PM + 45m = 7:15 PM
+        #expect(migratedBedtime.nightWindowStartMinutesFromMidnight == 1110)
+
+        let legacyTooEarly = try decoder.decode(
+            ScheduleConfig.self,
+            from: Data(#"{"bedtime_window_start_minutes_from_midnight":900}"#.utf8)
+        )
+        #expect(legacyTooEarly.targetBedtimeMinutesFromMidnight == 1050)
+
+        let legacyTooLate = try decoder.decode(
+            ScheduleConfig.self,
+            from: Data(#"{"bedtime_window_start_minutes_from_midnight":1380}"#.utf8)
+        )
+        #expect(legacyTooLate.targetBedtimeMinutesFromMidnight == 1380)
+
+        // Canonical key wins over legacy key if both are present
+        let bothKeys = try decoder.decode(
+            ScheduleConfig.self,
+            from: Data(#"{"target_bedtime_minutes_from_midnight":1200,"bedtime_window_start_minutes_from_midnight":1110}"#.utf8)
+        )
+        #expect(bothKeys.targetBedtimeMinutesFromMidnight == 1200)
+
+        let custom = ScheduleConfig(
+            wakeWindowsMinutes: [150, 195],
+            targetDailyMilkOzMin: 24,
+            targetDailyMilkOzMax: 32,
+            targetBedtimeMinutesFromMidnight: 1200,
+            bedtimeWakeWindowMinutes: 240,
+            feedingIntervalMinutes: 210,
+            mealTargetMinutesFromMidnight: [720, 1050],
+            minMinutesAfterFeedForMeal: 60
+        )
+        let encoded = try encoder.encode(custom)
+        let jsonString = try #require(String(data: encoded, encoding: .utf8))
+        #expect(jsonString.contains("\"target_bedtime_minutes_from_midnight\":1200"))
+        #expect(jsonString.contains("\"bedtime_wake_window_minutes\":240"))
+        #expect(!jsonString.contains("\"bedtime_window_start_minutes_from_midnight\""))
+        #expect(jsonString.contains("\"feeding_interval_minutes\":210"))
+        #expect(jsonString.contains("\"meal_target_minutes_from_midnight\":[720,1050]"))
+        #expect(jsonString.contains("\"min_minutes_after_feed_for_meal\":60"))
+        #expect(try decoder.decode(ScheduleConfig.self, from: encoded) == custom)
     }
 
     @Test("Household invites, join requests, and updated Household/AuthSession DTOs round-trip cleanly")
@@ -1505,5 +1605,1049 @@ struct WakeWindowCalculatorTests {
             calendar: pacificCalendar
         )
         #expect(afterCatnap == nil)
+    }
+
+    @Test("SleepClassifier classifies daytime, twilight, clearly-night, duration guard, overnight, and switch-to-night suggestion")
+    func sleepClassifierComprehensiveRules() {
+        let config = ScheduleConfig() // targetBedtime = 7:30 PM (1170) -> twilight 5:15 PM (1035), night 6:45 PM (1125)
+
+        // Zone boundaries
+        #expect(SleepClassifier.zone(for: localTime(5, 59), config: config, calendar: pacificCalendar) == .night)
+        #expect(SleepClassifier.zone(for: localTime(6, 0), config: config, calendar: pacificCalendar) == .daytime)
+        #expect(SleepClassifier.zone(for: localTime(17, 14), config: config, calendar: pacificCalendar) == .daytime)
+        #expect(SleepClassifier.zone(for: localTime(17, 15), config: config, calendar: pacificCalendar) == .twilight)
+        #expect(SleepClassifier.zone(for: localTime(18, 44), config: config, calendar: pacificCalendar) == .twilight)
+        #expect(SleepClassifier.zone(for: localTime(18, 45), config: config, calendar: pacificCalendar) == .night)
+        #expect(SleepClassifier.zone(for: localTime(20, 0), config: config, calendar: pacificCalendar) == .night)
+        #expect(SleepClassifier.zone(for: localTime(2, 0), config: config, calendar: pacificCalendar) == .night)
+
+        let nap1 = makeNap(start: localTime(9, 30), end: localTime(11, 0))
+        let nap2 = makeNap(start: localTime(13, 30), end: localTime(14, 45))
+
+        // Zone 1 (clearly night at 7:00 PM - 8:00 PM): ALWAYS .night even with 0 or 1 naps!
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(19, 0),
+                completedNapsToday: [],
+                lastWakeAt: localTime(18, 0),
+                config: config,
+                calendar: pacificCalendar
+            ) == .night
+        )
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(20, 0),
+                completedNapsToday: [nap1],
+                lastWakeAt: localTime(18, 30),
+                config: config,
+                calendar: pacificCalendar
+            ) == .night
+        )
+
+        // Zone 2 (daytime): .nap
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(10, 0),
+                completedNapsToday: [],
+                lastWakeAt: localTime(7, 0),
+                config: config,
+                calendar: pacificCalendar
+            ) == .nap
+        )
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(16, 40),
+                completedNapsToday: [nap1, nap2],
+                lastWakeAt: localTime(14, 45),
+                config: config,
+                calendar: pacificCalendar
+            ) == .nap
+        )
+
+        // Zone 3 (twilight): past backup catnap cutoff (5:00 PM) -> .night
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(17, 30),
+                completedNapsToday: [],
+                lastWakeAt: localTime(16, 30),
+                config: config,
+                calendar: pacificCalendar
+            ) == .night
+        )
+
+        // Zone 3 (twilight) BEFORE cutoff: test using earlier target bedtime (6:30 PM -> twilight starts 4:15 PM, cutoff 5:00 PM)
+        let earlyBedtimeConfig = ScheduleConfig(
+            wakeWindowsMinutes: [150, 195],
+            backupCatnapCutoffMinutesFromMidnight: 1020, // 5:00 PM
+            targetBedtimeMinutesFromMidnight: 1110, // 6:30 PM -> twilight 4:15 PM, night 5:45 PM
+            bedtimeWakeWindowMinutes: 225 // 3h45m -> threshold = 195m (3h15m)
+        )
+        #expect(SleepClassifier.zone(for: localTime(16, 30), config: earlyBedtimeConfig, calendar: pacificCalendar) == .twilight)
+
+        // Twilight before cutoff, < 2 naps, short wake stretch (2h < 3h15m) -> .nap
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(16, 30),
+                completedNapsToday: [nap1],
+                lastWakeAt: localTime(14, 30),
+                config: earlyBedtimeConfig,
+                calendar: pacificCalendar
+            ) == .nap
+        )
+
+        // Twilight before cutoff, 2 naps already done (nap quota met) -> .night
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(16, 30),
+                completedNapsToday: [nap1, nap2],
+                lastWakeAt: localTime(14, 45),
+                config: earlyBedtimeConfig,
+                calendar: pacificCalendar
+            ) == .night
+        )
+
+        // Deleted or yesterday's nap does NOT count toward twilight nap quota
+        let deletedNap2 = makeNap(start: localTime(13, 30), end: localTime(14, 45), deletedAt: localTime(15, 0))
+        let yesterdayNap = makeNap(start: localTime(13, 30, day: 24), end: localTime(14, 45, day: 24))
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(16, 30),
+                completedNapsToday: [nap1, deletedNap2, yesterdayNap],
+                lastWakeAt: localTime(14, 30),
+                config: earlyBedtimeConfig,
+                calendar: pacificCalendar
+            ) == .nap
+        )
+
+        // Twilight before cutoff, 1 nap done, long wake stretch (>= 225 - 30 = 195m) -> .night
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(16, 30),
+                completedNapsToday: [nap1],
+                lastWakeAt: localTime(13, 15), // exactly 195m (3h15m) awake
+                config: earlyBedtimeConfig,
+                calendar: pacificCalendar
+            ) == .night
+        )
+
+        // Duration guard: >= 3.5h (210m) even in daytime -> .night
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(10, 0),
+                end: localTime(13, 30), // exactly 210m
+                config: config,
+                calendar: pacificCalendar
+            ) == .night
+        )
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(10, 0),
+                end: localTime(13, 29), // 209m < 210m
+                config: config,
+                calendar: pacificCalendar
+            ) == .nap
+        )
+
+        // Duration guard: crossing midnight (even < 3.5h) -> .night
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(23, 0, day: 25),
+                end: localTime(0, 30, day: 26),
+                config: config,
+                calendar: pacificCalendar
+            ) == .night
+        )
+        // Daytime start crossing midnight (edge case) -> .night
+        #expect(
+            SleepClassifier.classify(
+                start: localTime(16, 0, day: 25),
+                end: localTime(0, 10, day: 26),
+                config: config,
+                calendar: pacificCalendar
+            ) == .night
+        )
+
+        // shouldSuggestSwitchToNight (default napCap = 90m -> threshold = 150m = 2h 30m, earliest start = 4:30 PM)
+        #expect(
+            SleepClassifier.shouldSuggestSwitchToNight(
+                startedAt: localTime(16, 45),
+                asOf: localTime(19, 20), // 2h 35m
+                sleepType: .nap,
+                config: config,
+                calendar: pacificCalendar
+            ) == true
+        )
+        #expect(
+            SleepClassifier.shouldSuggestSwitchToNight(
+                startedAt: localTime(16, 30),
+                asOf: localTime(19, 0), // exactly 2h 30m at 4:30 PM boundary
+                sleepType: .nap,
+                config: config,
+                calendar: pacificCalendar
+            ) == true
+        )
+        #expect(
+            SleepClassifier.shouldSuggestSwitchToNight(
+                startedAt: localTime(10, 0),
+                asOf: localTime(12, 35), // 2h 35m morning nap -> false
+                sleepType: .nap,
+                config: config,
+                calendar: pacificCalendar
+            ) == false
+        )
+        #expect(
+            SleepClassifier.shouldSuggestSwitchToNight(
+                startedAt: localTime(16, 29),
+                asOf: localTime(19, 30), // started before 4:30 PM -> false
+                sleepType: .nap,
+                config: config,
+                calendar: pacificCalendar
+            ) == false
+        )
+        #expect(
+            SleepClassifier.shouldSuggestSwitchToNight(
+                startedAt: localTime(17, 0),
+                asOf: localTime(18, 0), // only 1h -> false
+                sleepType: .nap,
+                config: config,
+                calendar: pacificCalendar
+            ) == false
+        )
+        #expect(
+            SleepClassifier.shouldSuggestSwitchToNight(
+                startedAt: localTime(16, 45),
+                asOf: localTime(19, 20),
+                sleepType: .night, // already night -> false
+                config: config,
+                calendar: pacificCalendar
+            ) == false
+        )
+    }
+
+    @Test("isWithinNightSleepWindow checks evening/overnight boundaries and suppresses evening/twilight nap predictions")
+    func nightSleepWindowAndEveningSuppression() {
+        let config = ScheduleConfig() // targetBedtime = 1170 (7:30 PM) -> nightStart = 1125 (6:45 PM), nightEnd = 360 (6:00 AM)
+
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(18, 44), config: config, calendar: pacificCalendar) == false)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(18, 45), config: config, calendar: pacificCalendar) == true)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(19, 30), config: config, calendar: pacificCalendar) == true)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(2, 0), config: config, calendar: pacificCalendar) == true)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(5, 59), config: config, calendar: pacificCalendar) == true)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(6, 0), config: config, calendar: pacificCalendar) == false)
+
+        // Custom earlier target bedtime (6:30 PM -> clearly night starts at 5:45 PM)
+        let earlyBedtimeConfig = ScheduleConfig(targetBedtimeMinutesFromMidnight: 1110)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(17, 44), config: earlyBedtimeConfig, calendar: pacificCalendar) == false)
+        #expect(WakeWindowCalculator.isWithinNightSleepWindow(localTime(17, 45), config: earlyBedtimeConfig, calendar: pacificCalendar) == true)
+
+        let wake = localTime(7, 0)
+
+        // At 7:15 PM with 0 naps logged -> must return nil (never suggest a daytime nap in evening window)
+        let eveningZeroNaps = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(19, 15),
+            wakeUpTime: wake,
+            completedNapsToday: [],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(eveningZeroNaps == nil)
+
+        // At 7:15 PM with only 1 nap logged -> must still return nil
+        let nap1 = makeNap(start: localTime(9, 30), end: localTime(11, 0))
+        let eveningOneNap = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(19, 15),
+            wakeUpTime: wake,
+            completedNapsToday: [nap1],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(eveningOneNap == nil)
+
+        // In twilight (5:30 PM, past 5:00 PM cutoff) with only 1 nap logged -> classified as .night -> nil
+        let twilightOneNap = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(17, 30),
+            wakeUpTime: wake,
+            completedNapsToday: [nap1],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(twilightOneNap == nil)
+
+        // Daytime asOf (5:00 PM), but Nap 1 ended late at 3:30 PM -> +195m = 6:45 PM (inside night window) -> nil
+        let lateNap1 = makeNap(start: localTime(14, 0), end: localTime(15, 30))
+        let recommendedInNightWindow = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(17, 0),
+            wakeUpTime: wake,
+            completedNapsToday: [lateNap1],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(recommendedInNightWindow == nil)
+
+        // Daytime asOf (4:00 PM), Nap 1 ended at 2:30 PM -> +195m = 5:45 PM (twilight past 5:00 PM cutoff -> .night) -> nil
+        let midAfternoonNap1 = makeNap(start: localTime(13, 0), end: localTime(14, 30))
+        let recommendedInTwilightBedtime = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(16, 0),
+            wakeUpTime: wake,
+            completedNapsToday: [midAfternoonNap1],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(recommendedInTwilightBedtime == nil)
+
+        // 4:40 PM backup catnap before 5:00 PM cutoff STILL predicts cleanly
+        let shortNap1 = makeNap(start: localTime(9, 30), end: localTime(10, 5))
+        let earlyNap2 = makeNap(start: localTime(12, 25), end: localTime(13, 25))
+        let fourFortyCatnap = WakeWindowCalculator.predictNextNap(
+            asOf: localTime(14, 0),
+            wakeUpTime: wake,
+            completedNapsToday: [shortNap1, earlyNap2],
+            config: config,
+            calendar: pacificCalendar
+        )
+        #expect(fourFortyCatnap?.isBackupCatnap == true)
+        #expect(fourFortyCatnap?.recommendedStart == localTime(16, 40))
+    }
+}
+
+@Suite("CareRhythmPredictors")
+struct CareRhythmPredictorsTests {
+    private let encoder = BlythesLifeJSONCoding.makeEncoder(sortedKeys: true)
+    private let decoder = BlythesLifeJSONCoding.makeDecoder()
+
+    private var pacificCalendar: Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        return cal
+    }
+
+    private func localTime(_ hour: Int, _ minute: Int, day: Int = 25) -> Date {
+        let components = DateComponents(
+            timeZone: TimeZone(identifier: "America/Los_Angeles"),
+            year: 2026,
+            month: 11,
+            day: day,
+            hour: hour,
+            minute: minute
+        )
+        return pacificCalendar.date(from: components)!
+    }
+
+    private func makeBottle(at start: Date, amountOz: Double = 4.0, deletedAt: Date? = nil) -> EventDTO {
+        EventDTO(
+            profileId: UUID(),
+            eventType: .feeding,
+            startedAt: start,
+            endedAt: nil,
+            timezone: "America/Los_Angeles",
+            metadata: .feeding(FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: amountOz)),
+            source: .manual,
+            createdBy: UUID(),
+            updatedBy: UUID(),
+            createdAt: start,
+            updatedAt: start,
+            deletedAt: deletedAt
+        )
+    }
+
+    private func makeNursing(
+        start: Date,
+        end: Date? = nil,
+        durationMinutes: Double? = nil,
+        leftDurationSeconds: Int? = nil,
+        rightDurationSeconds: Int? = nil,
+        deletedAt: Date? = nil
+    ) -> EventDTO {
+        EventDTO(
+            profileId: UUID(),
+            eventType: .feeding,
+            startedAt: start,
+            endedAt: end,
+            timezone: "America/Los_Angeles",
+            metadata: .feeding(
+                FeedingMetadata(
+                    method: .breast,
+                    substance: .breastMilk,
+                    side: .both,
+                    durationMinutes: durationMinutes,
+                    leftDurationSeconds: leftDurationSeconds,
+                    rightDurationSeconds: rightDurationSeconds
+                )
+            ),
+            source: .manual,
+            createdBy: UUID(),
+            updatedBy: UUID(),
+            createdAt: start,
+            updatedAt: end ?? start,
+            deletedAt: deletedAt
+        )
+    }
+
+    private func makePump(at start: Date) -> EventDTO {
+        EventDTO(
+            profileId: UUID(),
+            eventType: .pump,
+            startedAt: start,
+            endedAt: start.addingTimeInterval(15 * 60),
+            timezone: "America/Los_Angeles",
+            metadata: .pump(PumpMetadata(amountOz: 4.0, side: .both, durationMinutes: 15)),
+            source: .manual,
+            createdBy: UUID(),
+            updatedBy: UUID(),
+            createdAt: start,
+            updatedAt: start
+        )
+    }
+
+    private func makeMeal(at start: Date, slot: MealSlot? = nil, deletedAt: Date? = nil) -> EventDTO {
+        EventDTO(
+            profileId: UUID(),
+            eventType: .meal,
+            startedAt: start,
+            endedAt: nil,
+            timezone: "America/Los_Angeles",
+            metadata: .meal(MealMetadata(mealSlot: slot, portionEaten: .most)),
+            source: .manual,
+            createdBy: UUID(),
+            updatedBy: UUID(),
+            createdAt: start,
+            updatedAt: start,
+            deletedAt: deletedAt
+        )
+    }
+
+    @Test("MealSlotClassifier classifies clock zones, late-wake Breakfast anchor, and duplicate-lunch guard")
+    func mealSlotClassifierBoundariesAndContext() {
+        // Breakfast: < 10:30 AM (< 630)
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 0) == .breakfast)
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 480) == .breakfast) // 8:00 AM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 629) == .breakfast) // 10:29 AM
+        #expect(MealSlotClassifier.classify(date: localTime(8, 0), calendar: pacificCalendar) == .breakfast)
+        #expect(MealSlotClassifier.classify(date: localTime(10, 29), calendar: pacificCalendar) == .breakfast)
+
+        // Lunch: 10:30 AM – 2:29 PM (630..<870)
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 630) == .lunch) // 10:30 AM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 720) == .lunch) // 12:00 PM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 869) == .lunch) // 2:29 PM
+        #expect(MealSlotClassifier.classify(date: localTime(10, 30), calendar: pacificCalendar) == .lunch)
+        #expect(MealSlotClassifier.classify(date: localTime(12, 0), calendar: pacificCalendar) == .lunch)
+        #expect(MealSlotClassifier.classify(date: localTime(14, 29), calendar: pacificCalendar) == .lunch)
+
+        // Snack: 2:30 PM – 4:29 PM (870..<990)
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 870) == .snack) // 2:30 PM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 900) == .snack) // 3:00 PM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 989) == .snack) // 4:29 PM
+        #expect(MealSlotClassifier.classify(date: localTime(14, 30), calendar: pacificCalendar) == .snack)
+        #expect(MealSlotClassifier.classify(date: localTime(15, 0), calendar: pacificCalendar) == .snack)
+        #expect(MealSlotClassifier.classify(date: localTime(16, 29), calendar: pacificCalendar) == .snack)
+
+        // Dinner: 4:30 PM onward (>= 990), including single meal at 5:00 PM with 0 prior meals (NEVER shifted to lunch!)
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 990) == .dinner) // 4:30 PM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 1020) == .dinner) // 5:00 PM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 1439) == .dinner) // 11:59 PM
+        #expect(MealSlotClassifier.classify(date: localTime(16, 30), calendar: pacificCalendar) == .dinner)
+        #expect(MealSlotClassifier.classify(date: localTime(17, 0), existingMealsToday: [], calendar: pacificCalendar) == .dinner)
+
+        // Late-wake Breakfast anchor: 8:30 AM wake + 10:45 AM first meal (<= wake+2h30m & < 11:15 AM) -> .breakfast
+        let lateWake = localTime(8, 30)
+        #expect(
+            MealSlotClassifier.classify(
+                date: localTime(10, 45),
+                morningWakeAt: lateWake,
+                existingMealsToday: [],
+                calendar: pacificCalendar
+            ) == .breakfast
+        )
+        // If Breakfast was already logged, 10:45 AM falls back to .lunch
+        let earlierBreakfast = makeMeal(at: localTime(9, 0), slot: .breakfast)
+        #expect(
+            MealSlotClassifier.classify(
+                date: localTime(10, 45),
+                morningWakeAt: lateWake,
+                existingMealsToday: [earlierBreakfast],
+                calendar: pacificCalendar
+            ) == .lunch
+        )
+        // At or after 11:15 AM (mins == 675), late-wake Breakfast anchor does NOT apply -> .lunch
+        #expect(
+            MealSlotClassifier.classify(
+                date: localTime(11, 15),
+                morningWakeAt: localTime(9, 0),
+                existingMealsToday: [],
+                calendar: pacificCalendar
+            ) == .lunch
+        )
+        // More than 2h30m after wake (7:00 AM wake + 10:45 AM meal = 3h45m) -> .lunch
+        #expect(
+            MealSlotClassifier.classify(
+                date: localTime(10, 45),
+                morningWakeAt: localTime(7, 0),
+                existingMealsToday: [],
+                calendar: pacificCalendar
+            ) == .lunch
+        )
+
+        // Duplicate-lunch guard: 12:00 PM lunch already logged -> 2:00 PM second meal becomes .snack
+        let noonLunch = makeMeal(at: localTime(12, 0), slot: nil)
+        #expect(
+            MealSlotClassifier.classify(
+                date: localTime(14, 0),
+                existingMealsToday: [noonLunch],
+                calendar: pacificCalendar
+            ) == .snack
+        )
+        // Deleted or yesterday's lunch does NOT trigger duplicate-lunch guard
+        let deletedLunch = makeMeal(at: localTime(12, 0), slot: .lunch, deletedAt: localTime(12, 10))
+        let yesterdayLunch = makeMeal(at: localTime(12, 0, day: 24), slot: .lunch)
+        #expect(
+            MealSlotClassifier.classify(
+                date: localTime(14, 0),
+                existingMealsToday: [deletedLunch, yesterdayLunch],
+                calendar: pacificCalendar
+            ) == .lunch
+        )
+
+        // Normalization for negative and >= 1440 values
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: -60) == .dinner) // 11:00 PM
+        #expect(MealSlotClassifier.classify(minutesFromMidnight: 1440 + 480) == .breakfast) // 8:00 AM
+    }
+
+    @Test("FeedPredictor predicts daytime intervals, bedtime feed cap, light-feed notes, first feed, and night suppression")
+    func feedPredictorScenarios() throws {
+        let config = ScheduleConfig() // 180m interval, targetBedtime = 7:30 PM -> cap 7:00 PM, doneAfter 6:45 PM, lateCutoff 8:30 PM
+        let wake = localTime(7, 0)
+
+        // 1. First feed 30m after morning wake when no feed logged today
+        let firstFeed = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(7, 10),
+                wakeUpTime: wake,
+                eventsToday: [makePump(at: localTime(7, 5))], // pump does not count as feeding
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(firstFeed.recommendedStart == localTime(7, 30))
+        #expect(firstFeed.windowStart == localTime(7, 15))
+        #expect(firstFeed.windowEnd == localTime(7, 45))
+        #expect(firstFeed.intervalMinutes == 30)
+        #expect(firstFeed.lastFeedAt == nil)
+        #expect(firstFeed.isBedtimeFeed == false)
+        #expect(firstFeed.isLightFeedNote == false)
+        #expect(firstFeed.reason == "First feed after morning wake")
+
+        // No wakeUpTime and no feeds -> nil
+        #expect(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(7, 10),
+                wakeUpTime: nil,
+                eventsToday: [],
+                config: config,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // 2. Daytime 3h interval from bottle (ignoring deleted feed and yesterday's feed)
+        let yesterdayBottle = makeBottle(at: localTime(16, 0, day: 24))
+        let morningBottle = makeBottle(at: localTime(8, 15), amountOz: 4.0)
+        let deletedLaterBottle = makeBottle(at: localTime(10, 0), deletedAt: localTime(10, 5))
+        let afterBottle = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(10, 30),
+                wakeUpTime: wake,
+                eventsToday: [yesterdayBottle, morningBottle, deletedLaterBottle],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterBottle.recommendedStart == localTime(11, 15))
+        #expect(afterBottle.windowStart == localTime(11, 0))
+        #expect(afterBottle.windowEnd == localTime(11, 30))
+        #expect(afterBottle.intervalMinutes == 180)
+        #expect(afterBottle.lastFeedAt == localTime(8, 15))
+        #expect(afterBottle.isBedtimeFeed == false)
+        #expect(afterBottle.isLightFeedNote == false)
+
+        // 3. Daytime 3h interval anchored to nursing `endedAt`
+        let nursing = makeNursing(start: localTime(11, 15), end: localTime(11, 35))
+        let afterNursing = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(13, 0),
+                wakeUpTime: wake,
+                eventsToday: [morningBottle, nursing],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterNursing.lastFeedAt == localTime(11, 35))
+        #expect(afterNursing.recommendedStart == localTime(14, 35))
+        #expect(afterNursing.windowStart == localTime(14, 20))
+        #expect(afterNursing.windowEnd == localTime(14, 50))
+        #expect(afterNursing.isBedtimeFeed == false)
+        #expect(afterNursing.isLightFeedNote == false)
+
+        // Inverted nursing timestamps (endedAt < startedAt) fall back to startedAt
+        let invertedNursing = makeNursing(start: localTime(11, 30), end: localTime(11, 10))
+        let afterInverted = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(13, 0),
+                wakeUpTime: wake,
+                eventsToday: [invertedNursing],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterInverted.lastFeedAt == localTime(11, 30))
+        #expect(afterInverted.recommendedStart == localTime(14, 30))
+        #expect(afterInverted.isLightFeedNote == false)
+
+        // 4. Bedtime feed cap: 5:15 PM + 3h (8:15 PM) is capped to 7:00 PM with isBedtimeFeed == true
+        let lateAfternoonBottle = makeBottle(at: localTime(17, 15))
+        let bedtimeFeed = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(18, 0),
+                wakeUpTime: wake,
+                eventsToday: [lateAfternoonBottle],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(bedtimeFeed.recommendedStart == localTime(19, 0))
+        #expect(bedtimeFeed.windowStart == localTime(18, 45))
+        #expect(bedtimeFeed.windowEnd == localTime(19, 15))
+        #expect(bedtimeFeed.isBedtimeFeed == true)
+        #expect(bedtimeFeed.reason == "Bedtime feed before 7:30 PM")
+
+        // 5. Bedtime feed already taken at 6:55 PM (>= 6:45 PM bedtimeDoneAfter) -> nil
+        let bedtimeDoneBottle = makeBottle(at: localTime(18, 55))
+        #expect(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(19, 10),
+                wakeUpTime: wake,
+                eventsToday: [bedtimeDoneBottle],
+                config: config,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // Feed at exact 6:45 PM boundary (>= bedtimeDoneAfter) -> nil
+        #expect(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(19, 0),
+                wakeUpTime: wake,
+                eventsToday: [makeBottle(at: localTime(18, 45))],
+                config: config,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // Late evening cutoff: asOf > 8:30 PM (targetBedtime + 60m) -> nil
+        #expect(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(20, 35),
+                wakeUpTime: wake,
+                eventsToday: [lateAfternoonBottle],
+                config: config,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // 6. Light feed note: 1.0 oz bottle with no nearby meal -> isLightFeedNote == true
+        let lightBottle = makeBottle(at: localTime(13, 0), amountOz: 1.0)
+        let afterLightBottle = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(13, 30),
+                wakeUpTime: wake,
+                eventsToday: [lightBottle],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterLightBottle.isLightFeedNote == true)
+        #expect(afterLightBottle.recommendedStart == localTime(16, 0))
+
+        // 1.0 oz bottle right after a solid meal (within ±45m) -> isLightFeedNote == false
+        let lunchMeal = makeMeal(at: localTime(12, 30), slot: .lunch)
+        let afterLightBottleWithMeal = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(13, 30),
+                wakeUpTime: wake,
+                eventsToday: [lunchMeal, lightBottle],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterLightBottleWithMeal.isLightFeedNote == false)
+
+        // Brief nursing (2m via durationMinutes, via left+right seconds, and via endedAt - startedAt) -> isLightFeedNote == true
+        let briefNursingDuration = makeNursing(start: localTime(14, 0), durationMinutes: 2.0)
+        let afterBriefDuration = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(14, 15),
+                wakeUpTime: wake,
+                eventsToday: [briefNursingDuration],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterBriefDuration.isLightFeedNote == true)
+
+        let briefNursingSplit = makeNursing(start: localTime(14, 0), leftDurationSeconds: 70, rightDurationSeconds: 50)
+        let afterBriefSplit = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(14, 15),
+                wakeUpTime: wake,
+                eventsToday: [briefNursingSplit],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterBriefSplit.isLightFeedNote == true)
+
+        let briefNursingTimestamps = makeNursing(start: localTime(14, 0), end: localTime(14, 2))
+        let afterBriefTimestamps = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(14, 15),
+                wakeUpTime: wake,
+                eventsToday: [briefNursingTimestamps],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterBriefTimestamps.isLightFeedNote == true)
+
+        // Brief nursing right after a meal -> isLightFeedNote == false
+        let snackMeal = makeMeal(at: localTime(13, 45), slot: .snack)
+        let afterBriefNursingWithMeal = try #require(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(14, 15),
+                wakeUpTime: wake,
+                eventsToday: [snackMeal, briefNursingTimestamps],
+                config: config,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(afterBriefNursingWithMeal.isLightFeedNote == false)
+
+        // 7. Active night sleep suppresses feed prediction
+        #expect(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(18, 0),
+                wakeUpTime: wake,
+                eventsToday: [lateAfternoonBottle],
+                isNightSleepActive: true,
+                config: config,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // Non-positive feeding interval suppresses feed prediction
+        let disabledConfig = ScheduleConfig(feedingIntervalMinutes: 0)
+        #expect(
+            FeedPredictor.predictNextFeed(
+                asOf: localTime(10, 30),
+                wakeUpTime: wake,
+                eventsToday: [morningBottle],
+                config: disabledConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // Codable snake_case round-trip (including is_bedtime_feed & is_light_feed_note)
+        let encoded = try encoder.encode(bedtimeFeed)
+        let json = try #require(String(data: encoded, encoding: .utf8))
+        #expect(json.contains("\"recommended_start\""))
+        #expect(json.contains("\"window_start\""))
+        #expect(json.contains("\"window_end\""))
+        #expect(json.contains("\"interval_minutes\":180"))
+        #expect(json.contains("\"last_feed_at\""))
+        #expect(json.contains("\"is_bedtime_feed\":true"))
+        #expect(json.contains("\"is_light_feed_note\":false"))
+        #expect(try decoder.decode(NextFeedPrediction.self, from: encoded) == bedtimeFeed)
+
+        // Backward-compatible decoding when new booleans are omitted
+        let legacyFeedPredJSON = """
+        {
+          "recommended_start": "2026-11-25T19:15:00Z",
+          "window_start": "2026-11-25T19:00:00Z",
+          "window_end": "2026-11-25T19:30:00Z",
+          "interval_minutes": 180,
+          "reason": "Every 3h after last feed"
+        }
+        """
+        let decodedLegacyFeedPred = try decoder.decode(NextFeedPrediction.self, from: Data(legacyFeedPredJSON.utf8))
+        #expect(decodedLegacyFeedPred.isBedtimeFeed == false)
+        #expect(decodedLegacyFeedPred.isLightFeedNote == false)
+    }
+
+    @Test("MealPredictor handles active nap waiting, 5:00 PM dinner slot, missed lunch rollover, optional feed spacing, and bedtime cutoff")
+    func mealPredictorScenarios() throws {
+        // 1. 1-meal Dinner-only schedule
+        let oneMealConfig = ScheduleConfig(
+            mealTargetMinutesFromMidnight: ScheduleConfig.defaultMealTargets(forMealCount: 1)
+        )
+        let dinnerOnly = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(15, 0),
+                eventsToday: [],
+                config: oneMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(dinnerOnly.slot == .dinner)
+        #expect(dinnerOnly.recommendedStart == localTime(17, 30))
+        #expect(dinnerOnly.windowStart == localTime(17, 10))
+        #expect(dinnerOnly.windowEnd == localTime(17, 50))
+        #expect(dinnerOnly.isSpacedAfterFeed == false)
+        #expect(dinnerOnly.isWaitingForNap == false)
+
+        // After single meal at 5:00 PM (with nil explicit slot -> resolves to .dinner) -> nil
+        let fivePmMeal = makeMeal(at: localTime(17, 0), slot: nil)
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(17, 30),
+                eventsToday: [fivePmMeal],
+                config: oneMealConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // 2. 3-meal progression: Breakfast -> Lunch -> Dinner -> nil
+        let threeMealConfig = ScheduleConfig(
+            mealTargetMinutesFromMidnight: ScheduleConfig.defaultMealTargets(forMealCount: 3)
+        )
+        let breakfastPred = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(7, 30),
+                eventsToday: [],
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(breakfastPred.slot == .breakfast)
+        #expect(breakfastPred.recommendedStart == localTime(8, 30))
+        #expect(breakfastPred.windowStart == localTime(8, 10))
+        #expect(breakfastPred.windowEnd == localTime(8, 50))
+        #expect(breakfastPred.isWaitingForNap == false)
+
+        let breakfastDone = makeMeal(at: localTime(8, 35), slot: nil)
+        let lunchPred = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(11, 0),
+                eventsToday: [breakfastDone],
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(lunchPred.slot == .lunch)
+        #expect(lunchPred.recommendedStart == localTime(12, 30))
+        #expect(lunchPred.isWaitingForNap == false)
+
+        // 2b. Active nap during lunch window (asOf >= recommendedStart - 20m) -> isWaitingForNap == true
+        let lunchWaitingForNap = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(12, 15),
+                eventsToday: [breakfastDone],
+                isNapActive: true,
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(lunchWaitingForNap.slot == .lunch)
+        #expect(lunchWaitingForNap.recommendedStart == localTime(12, 30))
+        #expect(lunchWaitingForNap.isWaitingForNap == true)
+        #expect(lunchWaitingForNap.reason == "Waiting until after nap")
+
+        // Active nap well before lunch window (10:00 AM < 12:10 PM) -> isWaitingForNap == false
+        let morningNapBeforeLunch = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(10, 0),
+                eventsToday: [breakfastDone],
+                isNapActive: true,
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(morningNapBeforeLunch.slot == .lunch)
+        #expect(morningNapBeforeLunch.isWaitingForNap == false)
+
+        let lunchDone = makeMeal(at: localTime(12, 20), slot: nil)
+        let dinnerPred = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(15, 30),
+                eventsToday: [breakfastDone, lunchDone],
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(dinnerPred.slot == .dinner)
+        #expect(dinnerPred.recommendedStart == localTime(17, 30))
+
+        let dinnerDone = makeMeal(at: localTime(17, 25), slot: .dinner)
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(18, 0),
+                eventsToday: [breakfastDone, lunchDone, dinnerDone],
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // 3. Single meal logged at 5:00 PM (slot: nil) marks Dinner done — NEVER Lunch!
+        let twoMealConfig = ScheduleConfig(
+            mealTargetMinutesFromMidnight: ScheduleConfig.defaultMealTargets(forMealCount: 2) // 12:00 PM Lunch, 5:30 PM Dinner
+        )
+        // At 5:15 PM after logging the 5:00 PM meal -> Dinner is done and Lunch was >90m ago -> nil (not Dinner, not stale Lunch)
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(17, 15),
+                eventsToday: [fivePmMeal],
+                config: twoMealConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+        // Also verify explicitly that Lunch was NOT marked done (if checked during lunch window at 12:30 PM, Lunch is still unlogged)
+        let stillNeedsLunch = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(12, 30),
+                eventsToday: [fivePmMeal],
+                config: twoMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(stillNeedsLunch.slot == .lunch)
+
+        // 4. Missed Lunch at 4:00 PM rolls over cleanly to Dinner at 5:30 PM
+        let skippedLunch = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(16, 0),
+                eventsToday: [],
+                config: twoMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(skippedLunch.slot == .dinner)
+        #expect(skippedLunch.recommendedStart == localTime(17, 30))
+        #expect(skippedLunch.isSpacedAfterFeed == false)
+
+        // 5. Optional feed spacing: 45m nudges 5:30 PM Dinner after 5:15 PM bottle to 6:00 PM; 0 (Off) does NOT nudge
+        let recentBottle = makeBottle(at: localTime(17, 15))
+        let spacedDinner = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(17, 20),
+                eventsToday: [breakfastDone, lunchDone, recentBottle],
+                config: threeMealConfig, // default 45m spacing
+                calendar: pacificCalendar
+            )
+        )
+        #expect(spacedDinner.slot == .dinner)
+        #expect(spacedDinner.recommendedStart == localTime(18, 0))
+        #expect(spacedDinner.windowStart == localTime(17, 40))
+        #expect(spacedDinner.windowEnd == localTime(18, 20))
+        #expect(spacedDinner.isSpacedAfterFeed == true)
+
+        let noFeedSpacingConfig = ScheduleConfig(
+            mealTargetMinutesFromMidnight: ScheduleConfig.defaultMealTargets(forMealCount: 3),
+            minMinutesAfterFeedForMeal: 0
+        )
+        let spacingOffDinner = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(17, 20),
+                eventsToday: [breakfastDone, lunchDone, recentBottle],
+                config: noFeedSpacingConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(spacingOffDinner.recommendedStart == localTime(17, 30))
+        #expect(spacingOffDinner.isSpacedAfterFeed == false)
+
+        // Earlier bottle at 4:30 PM (60m before 5:30 PM Dinner >= 45m) does NOT nudge
+        let earlierBottle = makeBottle(at: localTime(16, 30))
+        let unspacedDinner = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(16, 45),
+                eventsToday: [breakfastDone, lunchDone, earlierBottle],
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(unspacedDinner.recommendedStart == localTime(17, 30))
+        #expect(unspacedDinner.isSpacedAfterFeed == false)
+
+        // 6. Active night sleep suppresses meal prediction
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(16, 0),
+                eventsToday: [],
+                isNightSleepActive: true,
+                config: threeMealConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // 7. At or after target bedtime (7:30 PM = 1170) suppresses meal prediction
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(19, 30),
+                eventsToday: [],
+                config: oneMealConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(19, 35),
+                eventsToday: [],
+                config: oneMealConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // Deleted meals and empty meal target schedule handled cleanly
+        let deletedDinner = makeMeal(at: localTime(17, 0), slot: .dinner, deletedAt: localTime(17, 5))
+        let stillNeedsDinner = try #require(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(17, 10),
+                eventsToday: [deletedDinner],
+                config: oneMealConfig,
+                calendar: pacificCalendar
+            )
+        )
+        #expect(stillNeedsDinner.slot == .dinner)
+
+        let noMealsConfig = ScheduleConfig(mealTargetMinutesFromMidnight: [])
+        #expect(
+            MealPredictor.predictNextMeal(
+                asOf: localTime(12, 0),
+                eventsToday: [],
+                config: noMealsConfig,
+                calendar: pacificCalendar
+            ) == nil
+        )
+
+        // Codable snake_case round-trip (including is_waiting_for_nap)
+        let encoded = try encoder.encode(lunchWaitingForNap)
+        let json = try #require(String(data: encoded, encoding: .utf8))
+        #expect(json.contains("\"slot\":\"lunch\""))
+        #expect(json.contains("\"recommended_start\""))
+        #expect(json.contains("\"window_start\""))
+        #expect(json.contains("\"window_end\""))
+        #expect(json.contains("\"is_spaced_after_feed\":false"))
+        #expect(json.contains("\"is_waiting_for_nap\":true"))
+        #expect(try decoder.decode(NextMealPrediction.self, from: encoded) == lunchWaitingForNap)
+
+        // Backward-compatible decoding when is_waiting_for_nap is omitted
+        let legacyMealPredJSON = """
+        {
+          "slot": "dinner",
+          "recommended_start": "2026-11-26T02:00:00Z",
+          "window_start": "2026-11-26T01:40:00Z",
+          "window_end": "2026-11-26T02:20:00Z",
+          "is_spaced_after_feed": true,
+          "reason": "Dinner spaced 45m after last feed"
+        }
+        """
+        let decodedLegacyMealPred = try decoder.decode(NextMealPrediction.self, from: Data(legacyMealPredJSON.utf8))
+        #expect(decodedLegacyMealPred.isWaitingForNap == false)
     }
 }

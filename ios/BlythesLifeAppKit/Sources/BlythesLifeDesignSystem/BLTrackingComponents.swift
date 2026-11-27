@@ -201,14 +201,19 @@ private struct BLQuickTileStyle: ButtonStyle {
 
 // MARK: - BLGlanceStat
 
-/// Tappable summary stat card with 28pt tabular display-serif value.
+/// Tappable summary stat card with 28pt tabular display-serif value and optional SweetSpot progress bar and footer caption.
 public struct BLGlanceStat: View {
     @Environment(\.blTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let kind: BLEventKind?
     private let label: String
     private let value: String
     private let sub: String?
+    private let progress: Double?
+    private let isOver: Bool
+    private let footer: String?
+    private let footerHighlight: String?
     private let action: (() -> Void)?
 
     public init(
@@ -216,13 +221,26 @@ public struct BLGlanceStat: View {
         label: String,
         value: String,
         sub: String? = nil,
+        progress: Double? = nil,
+        isOver: Bool = false,
+        footer: String? = nil,
+        footerHighlight: String? = nil,
         action: (() -> Void)? = nil
     ) {
         self.kind = kind
         self.label = label
         self.value = value
         self.sub = sub
+        self.progress = progress
+        self.isOver = isOver
+        self.footer = footer
+        self.footerHighlight = footerHighlight
         self.action = action
+    }
+
+    private var progressFillColor: Color {
+        if isOver { return theme.warn.solid }
+        return kind.map { theme.event($0).solid } ?? theme.accent
     }
 
     public var body: some View {
@@ -250,6 +268,37 @@ public struct BLGlanceStat: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
+
+            if let progress {
+                let clamped = progress.isFinite ? min(max(progress, 0.0), 1.0) : 0.0
+                GeometryReader { geo in
+                    let width = max(0, geo.size.width)
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(theme.bgSunken)
+                            .frame(width: width, height: 3)
+
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(progressFillColor)
+                            .frame(width: width * clamped, height: 3)
+                            .animation(
+                                BLMotion.easeOut(duration: BLMotion.base, reducedMotion: reduceMotion),
+                                value: clamped
+                            )
+                    }
+                }
+                .frame(height: 3)
+                .padding(.top, 6)
+                .accessibilityHidden(true)
+            }
+
+            if let footer, !footer.isEmpty {
+                footerText(footer)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .truncationMode(.tail)
+                    .padding(.top, progress == nil ? 4 : 3)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, BLSpacing.space3)
@@ -266,6 +315,40 @@ public struct BLGlanceStat: View {
                 .background(shape.fill(theme.bgSurface))
                 .overlay(shape.strokeBorder(theme.borderHairline, lineWidth: BLSpacing.borderWidth))
         }
+    }
+
+    private func footerText(_ footer: String) -> Text {
+        let baseFont = BLFont.ui(size: 12, weight: .medium, tabularNumerals: true)
+        let highlightFont = BLFont.ui(size: 12, weight: .semibold, tabularNumerals: true)
+        let highlightColor = isOver ? theme.warn.ink : theme.textPrimary
+
+        guard let highlight = footerHighlight, !highlight.isEmpty else {
+            return Text(footer)
+                .font(baseFont)
+                .foregroundColor(theme.textSecondary)
+        }
+
+        if let range = footer.range(of: highlight) {
+            let leading = String(footer[..<range.lowerBound])
+            let match = String(footer[range])
+            let trailing = String(footer[range.upperBound...])
+            return Text(leading)
+                .font(baseFont)
+                .foregroundColor(theme.textSecondary)
+                + Text(match)
+                    .font(highlightFont)
+                    .foregroundColor(highlightColor)
+                + Text(trailing)
+                    .font(baseFont)
+                    .foregroundColor(theme.textSecondary)
+        }
+
+        return Text(footer + " ")
+            .font(baseFont)
+            .foregroundColor(theme.textSecondary)
+            + Text(highlight)
+                .font(highlightFont)
+                .foregroundColor(highlightColor)
     }
 }
 

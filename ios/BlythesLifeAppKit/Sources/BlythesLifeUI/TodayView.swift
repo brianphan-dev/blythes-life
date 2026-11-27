@@ -216,7 +216,8 @@ public struct TodayView: View {
     @ViewBuilder
     private var heroAndSummaryStack: some View {
         let nap = store.napCardState
-        let lastFeed = store.lastFeedGlance
+        let feed = store.feedSweetSpot
+        let meal = store.mealSweetSpot
         let lastDiaper = store.lastDiaperGlance
 
         BLNapCard(
@@ -233,29 +234,66 @@ public struct TodayView: View {
             onSecondary: { onOpenLog(.sleep) }
         )
 
+        if store.shouldSuggestSwitchActiveSleepToNight {
+            lateNapSwitchBanner
+                .padding(.top, BLSpacing.space2)
+        }
+
         if let nursing = store.activeNursing {
             activeNursingBanner(session: nursing)
                 .padding(.top, BLSpacing.space2)
         }
 
-        HStack(spacing: BLSpacing.space2) {
+        HStack(alignment: .top, spacing: BLSpacing.space2) {
             BLGlanceStat(
-                kind: lastFeed.isNursing ? .nursing : .feeding,
-                label: lastFeed.title,
-                value: lastFeed.elapsedText,
-                sub: lastFeed.subtitle
+                kind: feed.isNursing ? .nursing : .feeding,
+                label: feed.title,
+                value: feed.primaryValue,
+                sub: feed.subtitle,
+                progress: feed.progress,
+                isOver: feed.isOver,
+                footer: feed.fullSweetSpotCaption,
+                footerHighlight: feed.highlightedClockTime
             ) {
-                onOpenLog(lastFeed.isNursing ? .nursing : .feeding)
+                onOpenLog(feed.isNursing ? .nursing : .feeding)
             }
 
             BLGlanceStat(
-                kind: .diaper,
-                label: lastDiaper.title,
-                value: lastDiaper.elapsedText,
-                sub: lastDiaper.subtitle
+                kind: .meal,
+                label: meal.title,
+                value: meal.primaryValue,
+                sub: meal.subtitle,
+                progress: meal.progress,
+                isOver: meal.isOver,
+                footer: meal.fullSweetSpotCaption,
+                footerHighlight: meal.highlightedClockTime
             ) {
-                onOpenLog(.diaper)
+                onOpenLog(.meal)
             }
+        }
+        .padding(.top, BLSpacing.space2)
+
+        BLCard(isFlush: true, onTap: { onOpenLog(.diaper) }) {
+            HStack(spacing: BLSpacing.space3) {
+                BLEventIcon(kind: .diaper, size: .sm)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(lastDiaper.title)
+                        .blMicroLabel()
+                    Text(lastDiaper.subtitle)
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Text(lastDiaper.elapsedText)
+                    .font(BLFont.display(size: 20, weight: .medium, tabularNumerals: true))
+                    .foregroundStyle(theme.textPrimary)
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 14)
         }
         .padding(.top, BLSpacing.space2)
 
@@ -269,6 +307,33 @@ public struct TodayView: View {
         {
             pendingJoinRequestBanner(request: pendingReq)
                 .padding(.top, BLSpacing.space2)
+        }
+    }
+
+    private var lateNapSwitchBanner: some View {
+        BLCard(tone: .accent, isFlush: true) {
+            HStack(alignment: .center, spacing: BLSpacing.space3) {
+                BLEventIcon(kind: .sleep, size: .sm)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Running long for a late nap")
+                        .font(BLFont.ui(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(2)
+
+                    Text("Count this stretch as night sleep?")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                BLButton("Switch to night", variant: .primary, size: .sm) {
+                    store.switchActiveSleepType(.night)
+                }
+            }
+            .padding(.vertical, BLSpacing.space3)
+            .padding(.horizontal, 14)
         }
     }
 

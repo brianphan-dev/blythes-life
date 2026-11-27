@@ -110,6 +110,50 @@ public struct GlanceSummary: Sendable, Equatable {
     }
 }
 
+public struct RhythmSweetSpotViewModel: Sendable, Equatable {
+    public var title: String
+    public var primaryValue: String
+    public var subtitle: String
+    public var progress: Double?
+    public var isOver: Bool
+    public var sweetSpotPrefix: String?
+    public var highlightedClockTime: String?
+    public var sweetSpotSuffix: String?
+    public var isNursing: Bool
+    public var suggestedMealSlot: MealSlot?
+
+    public init(
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        progress: Double? = nil,
+        isOver: Bool = false,
+        sweetSpotPrefix: String? = nil,
+        highlightedClockTime: String? = nil,
+        sweetSpotSuffix: String? = nil,
+        isNursing: Bool = false,
+        suggestedMealSlot: MealSlot? = nil
+    ) {
+        self.title = title
+        self.primaryValue = primaryValue
+        self.subtitle = subtitle
+        self.progress = progress
+        self.isOver = isOver
+        self.sweetSpotPrefix = sweetSpotPrefix
+        self.highlightedClockTime = highlightedClockTime
+        self.sweetSpotSuffix = sweetSpotSuffix
+        self.isNursing = isNursing
+        self.suggestedMealSlot = suggestedMealSlot
+    }
+
+    public var fullSweetSpotCaption: String? {
+        guard sweetSpotPrefix != nil || highlightedClockTime != nil || sweetSpotSuffix != nil else {
+            return nil
+        }
+        return (sweetSpotPrefix ?? "") + (highlightedClockTime ?? "") + (sweetSpotSuffix ?? "")
+    }
+}
+
 public struct RhythmSleepSpan: Identifiable, Sendable, Equatable {
     public var id: String
     public var startMinute: Double
@@ -241,7 +285,7 @@ public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
 @MainActor
 @Observable
 public final class BlythesLifeStore {
-    public static let defaultBedtimeWakeWindowMinutes: Double = 240.0
+    public static let defaultBedtimeWakeWindowMinutes: Double = Double(ScheduleConfig.defaultBedtimeWakeWindowMinutes)
 
     public var profile: ProfileDTO
     public var household: HouseholdDTO
@@ -606,6 +650,118 @@ public final class BlythesLifeStore {
             .sorted { $0.startedAt < $1.startedAt }
     }
 
+    /// Latest completed `.night` sleep `endedAt` on today's local calendar day, or `nil` if no night sleep ended today.
+    public var morningWakeToday: Date? {
+        let calendar = profileCalendar
+        return activeEvents
+            .compactMap { event -> Date? in
+                guard event.eventType == .sleep,
+                      case .sleep(let meta) = event.metadata,
+                      meta.sleepType == .night,
+                      let endedAt = event.endedAt,
+                      endedAt >= event.startedAt,
+                      calendar.isDate(endedAt, inSameDayAs: now)
+                else {
+                    return nil
+                }
+                return endedAt
+            }
+            .max()
+    }
+
+    public func classifySleep(start: Date, end: Date? = nil) -> SleepType {
+        let calendar = profileCalendar
+        let completedNapsForDay: [EventDTO]
+        if calendar.isDate(start, inSameDayAs: now) {
+            completedNapsForDay = completedNapsToday
+        } else {
+            completedNapsForDay = activeEvents
+                .filter { event in
+                    guard event.eventType == .sleep,
+                          case .sleep(let meta) = event.metadata,
+                          meta.sleepType == .nap,
+                          let endedAt = event.endedAt,
+                          endedAt >= event.startedAt
+                    else {
+                        return false
+                    }
+                    return calendar.isDate(event.startedAt, inSameDayAs: start)
+                }
+                .sorted { $0.startedAt < $1.startedAt }
+        }
+        let lastWakeAt = activeEvents
+            .compactMap { event -> Date? in
+                guard event.eventType == .sleep,
+                      let endedAt = event.endedAt,
+                      endedAt >= event.startedAt,
+                      endedAt < start,
+                      calendar.isDate(endedAt, inSameDayAs: start)
+                else {
+                    return nil
+                }
+                return endedAt
+            }
+            .max()
+        return SleepClassifier.classify(
+            start: start,
+            end: end,
+            completedNapsToday: completedNapsForDay,
+            lastWakeAt: lastWakeAt,
+            config: profile.scheduleConfig,
+            calendar: calendar
+        )
+    }
+
+    public func shouldClassifySleepAsNight(asOf referenceDate: Date) -> Bool {
+        classifySleep(start: referenceDate, end: nil) == .night
+    }
+
+    public func classifyMealSlot(for date: Date, excludingEventId: UUID? = nil) -> MealSlot {
+        let calendar = profileCalendar
+        let existingMeals = activeEvents.filter { event in
+            guard event.eventType == .meal,
+                  event.id != excludingEventId,
+                  calendar.isDate(event.startedAt, inSameDayAs: date)
+            else {
+                return false
+            }
+            return true
+        }
+        return MealSlotClassifier.classify(
+            date: date,
+            morningWakeAt: morningWakeToday,
+            existingMealsToday: existingMeals,
+            calendar: calendar
+        )
+    }
+
+    public var isActiveSleepNight: Bool {
+        if let open = latestOpenSleepEvent(), case .sleep(let meta) = open.metadata {
+            return meta.sleepType == .night
+        }
+        if let napStart = activeNapStart {
+            return shouldClassifySleepAsNight(asOf: napStart)
+        }
+        return false
+    }
+
+    public var isActiveNap: Bool {
+        activeNapStart != nil && !isActiveSleepNight
+    }
+
+    public var shouldSuggestSwitchActiveSleepToNight: Bool {
+        guard let napStart = activeNapStart, !isActiveSleepNight else {
+            return false
+        }
+        return SleepClassifier.shouldSuggestSwitchToNight(
+            startedAt: napStart,
+            asOf: now,
+            sleepType: .nap,
+            config: profile.scheduleConfig,
+            calendar: profileCalendar
+        )
+    }
+
     public var napCardState: NapCardViewModel {
         let tz = profileTimeZone
         let calendar = profileCalendar
@@ -615,6 +771,24 @@ public final class BlythesLifeStore {
         // 1. Active live sleep timer
         if let napStart = activeNapStart {
             let elapsedMinutes = max(0, now.timeIntervalSince(napStart) / 60.0)
+            let startClock = FormattingHelpers.formatClock(napStart, timeZone: tz)
+
+            if isActiveSleepNight {
+                return NapCardViewModel(
+                    mode: .asleep,
+                    label: "Night sleep · since \(startClock)",
+                    elapsedText: FormattingHelpers.formatDuration(minutes: elapsedMinutes),
+                    progress: min(1.0, elapsedMinutes / 660.0),
+                    isOver: false,
+                    captionPrefix: "Night sleep",
+                    highlightedClockTime: nil,
+                    captionSuffix: nil,
+                    primaryActionLabel: "Wake up",
+                    secondaryActionLabel: "Change start time",
+                    prediction: nil
+                )
+            }
+
             let capMinutes = Double(max(1, profile.scheduleConfig.napCapMinutes))
             let remaining = capMinutes - elapsedMinutes
             let capClock = FormattingHelpers.formatClock(
@@ -630,7 +804,7 @@ public final class BlythesLifeStore {
 
             return NapCardViewModel(
                 mode: .asleep,
-                label: "\(sleepLabelPrefix) · since \(FormattingHelpers.formatClock(napStart, timeZone: tz))",
+                label: "\(sleepLabelPrefix) · since \(startClock)",
                 elapsedText: FormattingHelpers.formatDuration(minutes: elapsedMinutes),
                 progress: elapsedMinutes / capMinutes,
                 isOver: remaining < 0,
@@ -649,30 +823,23 @@ public final class BlythesLifeStore {
             return event.endedAt
         }
         guard let lastWake = todaySleepEnds.max() else {
+            let isBedtimeWindow = shouldClassifySleepAsNight(asOf: now)
             return NapCardViewModel(
                 mode: .awake,
                 label: "Awake",
                 elapsedText: "—",
                 progress: 0,
                 isOver: false,
-                captionPrefix: "No sleep logged yet today",
+                captionPrefix: isBedtimeWindow ? "Bedtime window" : "No sleep logged yet today",
                 highlightedClockTime: nil,
                 captionSuffix: nil,
-                primaryActionLabel: "Start nap",
+                primaryActionLabel: isBedtimeWindow ? "Start night sleep" : "Start nap",
                 secondaryActionLabel: "Add a past sleep",
                 prediction: nil
             )
         }
 
-        let morningWake = todayEvents
-            .filter { event in
-                if case .sleep(let meta) = event.metadata {
-                    return meta.sleepType == .night
-                }
-                return false
-            }
-            .compactMap(\.endedAt)
-            .max() ?? lastWake
+        let morningWake = morningWakeToday ?? lastWake
 
         let prediction = WakeWindowCalculator.predictNextNap(
             asOf: now,
@@ -709,9 +876,23 @@ public final class BlythesLifeStore {
             )
         }
 
-        // All daytime naps complete (or past backup catnap cutoff) -> Bedtime sweet spot
-        let bedtimeMinutes = Self.defaultBedtimeWakeWindowMinutes
-        let bedtimeTarget = lastWake.addingTimeInterval(bedtimeMinutes * 60.0)
+        // All daytime naps complete (or past backup catnap cutoff / inside evening bedtime window) -> Bedtime sweet spot
+        let bedtimeMinutes = Double(max(60, profile.scheduleConfig.bedtimeWakeWindowMinutes))
+        let rawBedtime = lastWake.addingTimeInterval(bedtimeMinutes * 60.0)
+        let targetBedtime = makeTimeOfDay(
+            onDayOf: now,
+            minutesFromMidnight: profile.scheduleConfig.targetBedtimeMinutesFromMidnight,
+            calendar: calendar
+        )
+        let bedtimeTarget: Date
+        if now >= targetBedtime.addingTimeInterval(-90 * 60),
+           rawBedtime > targetBedtime.addingTimeInterval(45 * 60)
+        {
+            bedtimeTarget = targetBedtime
+        } else {
+            bedtimeTarget = rawBedtime
+        }
+        let effectiveBedtimeWindowMinutes = max(1.0, bedtimeTarget.timeIntervalSince(lastWake) / 60.0)
         let remaining = bedtimeTarget.timeIntervalSince(now) / 60.0
         let bedtimeClock = FormattingHelpers.formatClock(bedtimeTarget, timeZone: tz)
         let suffix = remaining < 0
@@ -722,7 +903,7 @@ public final class BlythesLifeStore {
             mode: .awake,
             label: awakeLabel,
             elapsedText: FormattingHelpers.formatDuration(minutes: elapsedMinutes),
-            progress: elapsedMinutes / bedtimeMinutes,
+            progress: elapsedMinutes / effectiveBedtimeWindowMinutes,
             isOver: remaining < 0,
             captionPrefix: "Bedtime sweet spot ",
             highlightedClockTime: bedtimeClock,
@@ -754,6 +935,199 @@ public final class BlythesLifeStore {
         )
     }
 
+    public var feedSweetSpot: RhythmSweetSpotViewModel {
+        let tz = profileTimeZone
+        let glance = lastFeedGlance
+        let isNight = isActiveSleepNight
+        let prediction = FeedPredictor.predictNextFeed(
+            asOf: now,
+            wakeUpTime: morningWakeToday,
+            eventsToday: todayEvents,
+            isNightSleepActive: isNight,
+            config: profile.scheduleConfig,
+            calendar: profileCalendar
+        )
+
+        if let prediction {
+            if prediction.isLightFeedNote {
+                return RhythmSweetSpotViewModel(
+                    title: "Last feed",
+                    primaryValue: glance.elapsedText,
+                    subtitle: glance.subtitle,
+                    progress: nil,
+                    isOver: false,
+                    sweetSpotPrefix: "Light feed · may want more soon",
+                    highlightedClockTime: nil,
+                    sweetSpotSuffix: nil,
+                    isNursing: glance.isNursing,
+                    suggestedMealSlot: nil
+                )
+            }
+
+            let targetClock = FormattingHelpers.formatClock(prediction.recommendedStart, timeZone: tz)
+            let remaining = prediction.recommendedStart.timeIntervalSince(now) / 60.0
+            let suffix = remaining < 0
+                ? " · \(FormattingHelpers.formatDuration(minutes: -remaining)) ago"
+                : " · in \(FormattingHelpers.formatDuration(minutes: remaining))"
+
+            if prediction.isBedtimeFeed {
+                let progress: Double? = prediction.lastFeedAt.map { lastFeedAt in
+                    let spanMinutes = max(1.0, prediction.recommendedStart.timeIntervalSince(lastFeedAt) / 60.0)
+                    return max(0, now.timeIntervalSince(lastFeedAt) / 60.0) / spanMinutes
+                }
+                return RhythmSweetSpotViewModel(
+                    title: "Last feed",
+                    primaryValue: glance.elapsedText,
+                    subtitle: glance.subtitle,
+                    progress: progress,
+                    isOver: remaining < 0,
+                    sweetSpotPrefix: "Bedtime feed ",
+                    highlightedClockTime: targetClock,
+                    sweetSpotSuffix: suffix,
+                    isNursing: glance.isNursing,
+                    suggestedMealSlot: nil
+                )
+            }
+
+            let progress: Double? = prediction.lastFeedAt.map { lastFeedAt in
+                max(0, now.timeIntervalSince(lastFeedAt) / 60.0) / Double(max(1, prediction.intervalMinutes))
+            }
+
+            return RhythmSweetSpotViewModel(
+                title: "Last feed",
+                primaryValue: glance.elapsedText,
+                subtitle: glance.subtitle,
+                progress: progress,
+                isOver: remaining < 0,
+                sweetSpotPrefix: "Next ",
+                highlightedClockTime: targetClock,
+                sweetSpotSuffix: suffix,
+                isNursing: glance.isNursing,
+                suggestedMealSlot: nil
+            )
+        }
+
+        let captionPrefix: String?
+        if isNight {
+            captionPrefix = "Night sleep"
+        } else if glance.event != nil {
+            captionPrefix = "Done for tonight"
+        } else {
+            captionPrefix = nil
+        }
+
+        return RhythmSweetSpotViewModel(
+            title: "Last feed",
+            primaryValue: glance.elapsedText,
+            subtitle: glance.subtitle,
+            progress: nil,
+            isOver: false,
+            sweetSpotPrefix: captionPrefix,
+            highlightedClockTime: nil,
+            sweetSpotSuffix: nil,
+            isNursing: glance.isNursing,
+            suggestedMealSlot: nil
+        )
+    }
+
+    public var mealSweetSpot: RhythmSweetSpotViewModel {
+        let tz = profileTimeZone
+        let isNight = isActiveSleepNight
+        let lastMeal = todayEvents.first(where: { $0.eventType == .meal })
+        let prediction = MealPredictor.predictNextMeal(
+            asOf: now,
+            eventsToday: todayEvents,
+            isNightSleepActive: isNight,
+            isNapActive: isActiveNap,
+            config: profile.scheduleConfig,
+            calendar: profileCalendar
+        )
+
+        if let prediction {
+            let slotName = mealSlotTitle(prediction.slot)
+            let subtitle: String = {
+                guard let lastMeal else { return "None logged today" }
+                let lastClock = FormattingHelpers.formatClock(lastMeal.startedAt, timeZone: tz)
+                return "Last: \(eventTitle(for: lastMeal)) · \(lastClock)"
+            }()
+
+            if prediction.isWaitingForNap {
+                return RhythmSweetSpotViewModel(
+                    title: "Next meal",
+                    primaryValue: slotName,
+                    subtitle: subtitle,
+                    progress: nil,
+                    isOver: false,
+                    sweetSpotPrefix: "Waiting until after nap",
+                    highlightedClockTime: nil,
+                    sweetSpotSuffix: nil,
+                    isNursing: false,
+                    suggestedMealSlot: prediction.slot
+                )
+            }
+
+            let targetClock = FormattingHelpers.formatClock(prediction.recommendedStart, timeZone: tz)
+            let remaining = prediction.recommendedStart.timeIntervalSince(now) / 60.0
+            let isOver = remaining < 0
+            let progress = max(0, min(1.2, 1.0 - (remaining / 180.0)))
+            let suffix = isOver
+                ? " · \(FormattingHelpers.formatDuration(minutes: -remaining)) ago"
+                : " · in \(FormattingHelpers.formatDuration(minutes: remaining))"
+
+            return RhythmSweetSpotViewModel(
+                title: "Next meal",
+                primaryValue: slotName,
+                subtitle: subtitle,
+                progress: progress,
+                isOver: isOver,
+                sweetSpotPrefix: prediction.isSpacedAfterFeed ? "After feed · " : "Around ",
+                highlightedClockTime: targetClock,
+                sweetSpotSuffix: suffix,
+                isNursing: false,
+                suggestedMealSlot: prediction.slot
+            )
+        }
+
+        if let lastMeal {
+            let elapsedMinutes = max(0, now.timeIntervalSince(lastMeal.startedAt) / 60.0)
+            let mealTitle = eventTitle(for: lastMeal)
+            let detail = eventDetail(for: lastMeal)
+            let subtitle = detail == "Logged"
+                ? "\(mealTitle) · \(FormattingHelpers.formatClock(lastMeal.startedAt, timeZone: tz))"
+                : "\(mealTitle) · \(detail)"
+
+            return RhythmSweetSpotViewModel(
+                title: "Last meal",
+                primaryValue: FormattingHelpers.formatDuration(minutes: elapsedMinutes),
+                subtitle: subtitle,
+                progress: nil,
+                isOver: false,
+                sweetSpotPrefix: isNight ? "Night sleep" : "Done for today",
+                highlightedClockTime: nil,
+                sweetSpotSuffix: nil,
+                isNursing: false,
+                suggestedMealSlot: nil
+            )
+        }
+
+        return RhythmSweetSpotViewModel(
+            title: "Meals",
+            primaryValue: "—",
+            subtitle: "None logged today",
+            progress: nil,
+            isOver: false,
+            sweetSpotPrefix: isNight ? "Night sleep" : nil,
+            highlightedClockTime: nil,
+            sweetSpotSuffix: nil,
+            isNursing: false,
+            suggestedMealSlot: nil
+        )
+    }
+
+    private func mealSlotTitle(_ slot: MealSlot) -> String {
+        FormattingHelpers.formatMealSlot(slot)
+    }
+
     public var lastDiaperGlance: GlanceSummary {
         guard let diaper = todayEvents.first(where: { $0.eventType == .diaper }) else {
             return GlanceSummary(title: "Last diaper", elapsedText: "—", subtitle: "None today", isNursing: false, event: nil)
@@ -783,12 +1157,7 @@ public final class BlythesLifeStore {
         let tz = profileTimeZone
         let todayStart = calendar.startOfDay(for: now)
         let nonDeleted = activeEvents
-        let openSleepIsNap: Bool = {
-            if let open = latestOpenSleepEvent(), case .sleep(let meta) = open.metadata {
-                return meta.sleepType == .nap
-            }
-            return true
-        }()
+        let openSleepIsNap = !isActiveSleepNight
 
         let weekdayFormatter = DateFormatter()
         weekdayFormatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1013,7 +1382,7 @@ public final class BlythesLifeStore {
             activeNapStart = now
             appendEvents([openSleep])
 
-            showToast("Nap timer started on every device") { [weak self] in
+            showToast(isNight ? "Night sleep started on every device" : "Nap timer started on every device") { [weak self] in
                 guard let self else { return }
                 self.activeNapStart = nil
                 if self.hasLiveSession {
@@ -1136,6 +1505,49 @@ public final class BlythesLifeStore {
                 self.triggerBackgroundFlush()
             }
             self.persistState()
+        }
+    }
+
+    public func switchActiveSleepType(_ newType: SleepType) {
+        guard activeNapStart != nil else { return }
+        guard let idx = latestOpenSleepEventIndex() else { return }
+
+        let previous = events[idx]
+        let existingLocation: SleepLocation?
+        if case .sleep(let meta) = previous.metadata {
+            if meta.sleepType == newType {
+                return
+            }
+            existingLocation = meta.location
+        } else {
+            existingLocation = nil
+        }
+
+        var updated = previous
+        updated.metadata = .sleep(SleepMetadata(sleepType: newType, location: existingLocation))
+        updated.updatedAt = now
+        updated.updatedBy = currentUserId
+        events[idx] = updated
+
+        enqueueEventOutbox(updated, operation: .upsert)
+        persistState()
+        triggerBackgroundFlush()
+
+        let eventId = updated.id
+        let previousMetadata = previous.metadata
+        let toastMessage = newType == .night ? "Switched to night sleep" : "Switched to nap"
+        showToast(toastMessage) { [weak self] in
+            guard let self,
+                  let revertIdx = self.events.firstIndex(where: { $0.id == eventId })
+            else { return }
+            var reverted = self.events[revertIdx]
+            reverted.metadata = previousMetadata
+            reverted.updatedAt = self.now
+            reverted.updatedBy = self.currentUserId
+            self.events[revertIdx] = reverted
+            self.enqueueEventOutbox(reverted, operation: .upsert)
+            self.persistState()
+            self.triggerBackgroundFlush()
         }
     }
 
@@ -1707,6 +2119,15 @@ public final class BlythesLifeStore {
                 return endedAt
             }()
 
+            let resolvedMetadata: EventMetadata = {
+                if case .meal(var meta) = draft.metadata, meta.mealSlot == nil {
+                    let excludedId = draft.matchAction == .updateExisting ? draft.matchedEventId : nil
+                    meta.mealSlot = classifyMealSlot(for: effectiveStart, excludingEventId: excludedId)
+                    return .meal(meta)
+                }
+                return draft.metadata
+            }()
+
             if draft.matchAction == .updateExisting,
                let matchedId = draft.matchedEventId,
                let existingIdx = events.firstIndex(where: { $0.id == matchedId })
@@ -1716,7 +2137,7 @@ public final class BlythesLifeStore {
                 updated.startedAt = effectiveStart
                 updated.endedAt = adjustedEnd ?? previous.endedAt
                 updated.notes = draft.notes ?? previous.notes
-                updated.metadata = draft.metadata
+                updated.metadata = resolvedMetadata
                 updated.source = .paperScan
                 updated.scanId = sheetId
                 updated.updatedAt = now
@@ -1730,7 +2151,7 @@ public final class BlythesLifeStore {
                     startedAt: effectiveStart,
                     endedAt: adjustedEnd,
                     notes: draft.notes,
-                    metadata: draft.metadata,
+                    metadata: resolvedMetadata,
                     source: .paperScan,
                     scanId: sheetId
                 )
@@ -3318,17 +3739,6 @@ public final class BlythesLifeStore {
 
     // MARK: - Internal Helpers
 
-    private func shouldClassifySleepAsNight(asOf referenceDate: Date) -> Bool {
-        completedNapsToday.count >= profile.scheduleConfig.wakeWindowsMinutes.count
-            && WakeWindowCalculator.predictNextNap(
-                asOf: referenceDate,
-                wakeUpTime: todayEvents.compactMap { $0.eventType == .sleep ? $0.endedAt : nil }.max(),
-                completedNapsToday: completedNapsToday,
-                config: profile.scheduleConfig,
-                calendar: profileCalendar
-            ) == nil
-    }
-
     private func latestOpenSleepEvent() -> EventDTO? {
         activeEvents
             .filter { $0.profileId == profile.id && $0.eventType == .sleep && $0.endedAt == nil }
@@ -3349,6 +3759,24 @@ public final class BlythesLifeStore {
         } else {
             activeNapStart = nil
         }
+    }
+
+    private func makeTimeOfDay(
+        onDayOf referenceDate: Date,
+        minutesFromMidnight: Int,
+        calendar: Calendar
+    ) -> Date {
+        let clampedMinutes = min(max(minutesFromMidnight, 0), 1439)
+        var components = calendar.dateComponents([.year, .month, .day], from: referenceDate)
+        components.timeZone = calendar.timeZone
+        components.hour = clampedMinutes / 60
+        components.minute = clampedMinutes % 60
+        components.second = 0
+        if let date = calendar.date(from: components) {
+            return date
+        }
+        let startOfDay = calendar.startOfDay(for: referenceDate)
+        return startOfDay.addingTimeInterval(TimeInterval(clampedMinutes * 60))
     }
 
     private func makeEvent(

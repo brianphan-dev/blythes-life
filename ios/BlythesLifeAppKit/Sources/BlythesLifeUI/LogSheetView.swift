@@ -111,6 +111,7 @@ public struct LogSheetView: View {
 
     // Sleep state
     @State private var sleepType: SleepType = .nap
+    @State private var userSelectedSleepType: Bool
     @State private var sleepStart: Date
     @State private var sleepEnd: Date
 
@@ -133,6 +134,7 @@ public struct LogSheetView: View {
 
     // Meal state
     @State private var mealSlot: MealSlot
+    @State private var userSelectedMealSlot: Bool
     @State private var mealAte: String = ""
     @State private var mealPortion: PortionEaten = .most
 
@@ -164,15 +166,21 @@ public struct LogSheetView: View {
         let now = store.now
         let preferredUnit = store.preferredUnit
         let isMl = preferredUnit == .ml
-        let defaultMealSlot = Self.defaultMealSlot(for: now, calendar: store.profileCalendar)
 
         // Default values for create mode
         var initAgo = 0
         var initUsesCustom = false
         var initExact = now
-        var initSleepType: SleepType = .nap
         var initSleepStart = store.activeNapStart ?? now.addingTimeInterval(-3600)
         var initSleepEnd = now
+        var initSleepType: SleepType = .nap
+        if request.kind == .sleep && request.editingEvent == nil {
+            if store.activeNapStart != nil {
+                initSleepType = store.isActiveSleepNight ? .night : .nap
+            } else {
+                initSleepType = store.classifySleep(start: initSleepStart, end: initSleepEnd)
+            }
+        }
         var initAmount = request.kind == .pump ? (isMl ? "120" : "4") : (isMl ? "95" : "3.25")
         var initUnit = preferredUnit
         var initSubstance: FeedingSubstance = .formula
@@ -183,7 +191,7 @@ public struct LogSheetView: View {
         var initPee: DiaperSelection = .medium
         var initPoop: DiaperSelection = .none
         var initRash = false
-        var initSlot = defaultMealSlot
+        var initSlot = store.classifyMealSlot(for: initExact)
         var initAte = ""
         var initPortion: PortionEaten = .most
         var initHair = false
@@ -243,7 +251,10 @@ public struct LogSheetView: View {
                 initRash = meta.rash
 
             case .meal(let meta):
-                initSlot = meta.mealSlot ?? defaultMealSlot
+                initSlot = meta.mealSlot ?? store.classifyMealSlot(
+                    for: editing.startedAt,
+                    excludingEventId: editing.id
+                )
                 initAte = editing.notes ?? ""
                 initPortion = meta.portionEaten ?? .most
 
@@ -277,6 +288,7 @@ public struct LogSheetView: View {
         _usesCustomTime = State(initialValue: initUsesCustom)
         _exactTime = State(initialValue: initExact)
         _sleepType = State(initialValue: initSleepType)
+        _userSelectedSleepType = State(initialValue: request.editingEvent != nil)
         _sleepStart = State(initialValue: initSleepStart)
         _sleepEnd = State(initialValue: initSleepEnd)
         _amountText = State(initialValue: initAmount)
@@ -290,6 +302,7 @@ public struct LogSheetView: View {
         _poopSelection = State(initialValue: initPoop)
         _diaperRash = State(initialValue: initRash)
         _mealSlot = State(initialValue: initSlot)
+        _userSelectedMealSlot = State(initialValue: request.editingEvent != nil)
         _mealAte = State(initialValue: initAte)
         _mealPortion = State(initialValue: initPortion)
         _washedHair = State(initialValue: initHair)
@@ -392,8 +405,13 @@ public struct LogSheetView: View {
         switch request.kind {
         case .sleep:
             if isActiveNapStartMode {
+                let currentType: SleepType = store.isActiveSleepNight ? .night : .nap
+                let startChanged = abs((store.activeNapStart ?? sleepStart).timeIntervalSince(sleepStart)) >= 1.0
+                if sleepType != currentType && !startChanged {
+                    return sleepType == .night ? "Switch to night sleep" : "Switch to nap"
+                }
                 let clock = FormattingHelpers.formatClock(sleepStart, timeZone: store.profileTimeZone)
-                return "Set start to \(clock)"
+                return "Save · \(clock)"
             }
             let interval = resolvedSleepInterval
             guard interval.durationMinutes > 0 else {
@@ -494,6 +512,24 @@ public struct LogSheetView: View {
                 }
             }
         )
+        .onChange(of: sleepStart) { _, _ in
+            guard request.kind == .sleep && !isEditing && !isActiveNapStartMode && !userSelectedSleepType else {
+                return
+            }
+            sleepType = store.classifySleep(start: sleepStart, end: sleepEnd > sleepStart ? sleepEnd : nil)
+        }
+        .onChange(of: sleepEnd) { _, _ in
+            guard request.kind == .sleep && !isEditing && !isActiveNapStartMode && !userSelectedSleepType else {
+                return
+            }
+            sleepType = store.classifySleep(start: sleepStart, end: sleepEnd > sleepStart ? sleepEnd : nil)
+        }
+        .onChange(of: exactTime) { _, newTime in
+            guard request.kind == .meal && !isEditing && !userSelectedMealSlot else {
+                return
+            }
+            mealSlot = store.classifyMealSlot(for: newTime)
+        }
     }
 
     // MARK: - Form Sections
@@ -525,15 +561,32 @@ public struct LogSheetView: View {
     @ViewBuilder
     private var sleepForm: some View {
         if isActiveNapStartMode {
+            BLSegmentedControl(
+                options: [SleepType.nap, .night],
+                selection: $sleepType,
+                size: .md,
+                isBlock: true
+            ) { option in
+                option == .nap ? "Nap" : "Night sleep"
+            }
+
             BLTimeField(label: "Fell asleep", date: $sleepStart)
             Text("The timer keeps running on every device.")
                 .blTextRole(.callout)
                 .foregroundStyle(theme.textSecondary)
         } else {
             let interval = resolvedSleepInterval
+            let manualSleepTypeBinding = Binding<SleepType>(
+                get: { sleepType },
+                set: { newType in
+                    userSelectedSleepType = true
+                    sleepType = newType
+                }
+            )
+
             BLSegmentedControl(
                 options: [SleepType.nap, .night],
-                selection: $sleepType,
+                selection: manualSleepTypeBinding,
                 size: .lg,
                 isBlock: true
             ) { option in
@@ -692,10 +745,18 @@ public struct LogSheetView: View {
     }
 
     private var mealForm: some View {
-        VStack(alignment: .leading, spacing: BLSpacing.space5) {
+        let manualMealSlotBinding = Binding<MealSlot>(
+            get: { mealSlot },
+            set: { newSlot in
+                userSelectedMealSlot = true
+                mealSlot = newSlot
+            }
+        )
+
+        return VStack(alignment: .leading, spacing: BLSpacing.space5) {
             BLSegmentedControl(
                 options: [MealSlot.breakfast, .lunch, .dinner, .snack],
-                selection: $mealSlot,
+                selection: manualMealSlotBinding,
                 size: .md,
                 isBlock: true
             ) { mealSlotLabel($0) }
@@ -913,7 +974,14 @@ public struct LogSheetView: View {
         switch request.kind {
         case .sleep:
             if isActiveNapStartMode {
-                store.updateActiveNapStart(sleepStart)
+                let currentType: SleepType = store.isActiveSleepNight ? .night : .nap
+                let startChanged = abs((store.activeNapStart ?? sleepStart).timeIntervalSince(sleepStart)) >= 1.0
+                if startChanged {
+                    store.updateActiveNapStart(sleepStart)
+                }
+                if sleepType != currentType {
+                    store.switchActiveSleepType(sleepType)
+                }
             } else {
                 let interval = resolvedSleepInterval
                 guard interval.durationMinutes > 0 else { return }
@@ -1114,15 +1182,6 @@ public struct LogSheetView: View {
     }
 
     // MARK: - Label Helpers
-
-    private static func defaultMealSlot(for date: Date, calendar: Calendar) -> MealSlot {
-        let comps = calendar.dateComponents([.hour, .minute], from: date)
-        let mins = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
-        if mins < 630 { return .breakfast }
-        if mins < 900 { return .lunch }
-        if mins < 1020 { return .snack }
-        return .dinner
-    }
 
     private func volumeUnitLabel(_ unit: VolumeUnit) -> String {
         unit == .oz ? "oz" : "mL"

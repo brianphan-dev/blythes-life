@@ -46,6 +46,7 @@ public struct SettingsView: View {
 
     @State private var isBabyProfileSheetOpen = false
     @State private var isScheduleSheetOpen = false
+    @State private var isFeedMealSheetOpen = false
     @State private var isMembersSheetOpen = false
     @State private var isCreateInviteSheetOpen = false
     @State private var isJoinHouseholdSheetOpen = false
@@ -76,6 +77,7 @@ public struct SettingsView: View {
                                 .padding(.horizontal, -BLSpacing.screenGutter)
                             babyProfileGroup
                             napScheduleGroup
+                            feedMealScheduleGroup
                             loggingGroup
                             #if DEBUG
                             posturePreviewGroup
@@ -109,6 +111,7 @@ public struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 babyProfileGroup
                                 napScheduleGroup
+                                feedMealScheduleGroup
                                 loggingGroup
                                 #if DEBUG
                                 posturePreviewGroup
@@ -150,6 +153,18 @@ public struct SettingsView: View {
                     onSave: { updated in
                         store.updateScheduleConfig(updated)
                         isScheduleSheetOpen = false
+                    }
+                )
+                .zIndex(10)
+            }
+
+            if isFeedMealSheetOpen {
+                FeedMealScheduleEditorSheet(
+                    initialConfig: store.profile.scheduleConfig,
+                    onClose: { isFeedMealSheetOpen = false },
+                    onSave: { updated in
+                        store.updateScheduleConfig(updated)
+                        isFeedMealSheetOpen = false
                     }
                 )
                 .zIndex(10)
@@ -279,7 +294,7 @@ public struct SettingsView: View {
             ? ScheduleConfig.defaultWakeWindowsMinutes
             : config.wakeWindowsMinutes
 
-        return settingsGroup(title: "Nap schedule") {
+        return settingsGroup(title: "Nap & bedtime schedule") {
             BLCard(isFlush: true) {
                 VStack(spacing: 0) {
                     BLListRow(
@@ -297,6 +312,22 @@ public struct SettingsView: View {
                         )
                     }
                     BLListRow(
+                        label: "Awake before bedtime",
+                        value: FormattingHelpers.formatWakeWindowFraction(
+                            minutes: config.bedtimeWakeWindowMinutes
+                        ),
+                        showsChevron: true,
+                        onTap: { isScheduleSheetOpen = true }
+                    )
+                    BLListRow(
+                        label: "Target bedtime",
+                        value: FormattingHelpers.formatMinutesFromMidnight(
+                            config.targetBedtimeMinutesFromMidnight
+                        ),
+                        showsChevron: true,
+                        onTap: { isScheduleSheetOpen = true }
+                    )
+                    BLListRow(
                         label: "Nap cap",
                         value: FormattingHelpers.formatWakeWindowFraction(minutes: config.napCapMinutes),
                         showsChevron: true,
@@ -310,6 +341,53 @@ public struct SettingsView: View {
                         showsChevron: true,
                         showDivider: false,
                         onTap: { isScheduleSheetOpen = true }
+                    )
+                }
+            }
+        }
+    }
+
+    private var feedMealScheduleGroup: some View {
+        let config = store.profile.scheduleConfig
+        let mealTargets = config.mealTargetMinutesFromMidnight.isEmpty
+            ? ScheduleConfig.defaultMealTargetMinutesFromMidnight
+            : config.mealTargetMinutesFromMidnight.sorted()
+
+        return settingsGroup(title: "Feed & meal sweet spots") {
+            BLCard(isFlush: true) {
+                VStack(spacing: 0) {
+                    BLListRow(
+                        label: "Time between feeds",
+                        value: FormattingHelpers.formatWakeWindowFraction(
+                            minutes: config.feedingIntervalMinutes
+                        ),
+                        showsChevron: true,
+                        onTap: { isFeedMealSheetOpen = true }
+                    )
+                    BLListRow(
+                        label: "Solid meals per day",
+                        value: "\(mealTargets.count)",
+                        showsChevron: true,
+                        onTap: { isFeedMealSheetOpen = true }
+                    )
+                    ForEach(Array(mealTargets.enumerated()), id: \.offset) { _, mins in
+                        BLListRow(
+                            label: FormattingHelpers.formatMealSlot(
+                                MealSlotClassifier.classify(minutesFromMidnight: mins)
+                            ),
+                            value: FormattingHelpers.formatMinutesFromMidnight(mins),
+                            showsChevron: true,
+                            onTap: { isFeedMealSheetOpen = true }
+                        )
+                    }
+                    BLListRow(
+                        label: "Spacing after a feed",
+                        value: config.minMinutesAfterFeedForMeal == 0
+                            ? "Off"
+                            : "\(config.minMinutesAfterFeedForMeal)m",
+                        showsChevron: true,
+                        showDivider: false,
+                        onTap: { isFeedMealSheetOpen = true }
                     )
                 }
             }
@@ -1053,8 +1131,9 @@ private func householdRoleLabel(_ role: HouseholdRole) -> String {
     }
 }
 
-// MARK: - Nap Schedule Editor Sheet
+// MARK: - Nap & Bedtime Schedule Editor Sheet
 
+@MainActor
 private struct NapScheduleEditorSheet: View {
     @Environment(\.blTheme) private var theme
 
@@ -1062,6 +1141,8 @@ private struct NapScheduleEditorSheet: View {
     let onSave: (ScheduleConfig) -> Void
 
     @State private var wakeWindows: [Int]
+    @State private var bedtimeWakeWindow: Int
+    @State private var targetBedtime: Int
     @State private var napCap: Int
     @State private var backupCutoff: Int
     private let baseConfig: ScheduleConfig
@@ -1079,6 +1160,8 @@ private struct NapScheduleEditorSheet: View {
             : initialConfig.wakeWindowsMinutes
         let clamped = Array(source.prefix(4)).map { min(max($0, 45), 420) }
         _wakeWindows = State(initialValue: clamped)
+        _bedtimeWakeWindow = State(initialValue: min(max(initialConfig.bedtimeWakeWindowMinutes, 90), 420))
+        _targetBedtime = State(initialValue: min(max(initialConfig.targetBedtimeMinutesFromMidnight, 1080), 1320))
         _napCap = State(initialValue: min(max(initialConfig.napCapMinutes, 30), 240))
         _backupCutoff = State(initialValue: min(max(initialConfig.backupCatnapCutoffMinutesFromMidnight, 840), 1140))
     }
@@ -1105,6 +1188,7 @@ private struct NapScheduleEditorSheet: View {
                     }
                     wakeWindows = next
                 }
+                bedtimeWakeWindow = ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: targetCount)
             }
         )
     }
@@ -1112,7 +1196,7 @@ private struct NapScheduleEditorSheet: View {
     var body: some View {
         BLSheetContainer(
             isPresented: true,
-            title: "Nap schedule",
+            title: "Nap & bedtime schedule",
             showScrim: true,
             onClose: onClose,
             icon: {
@@ -1138,13 +1222,14 @@ private struct NapScheduleEditorSheet: View {
                             size: .sm
                         ) {
                             wakeWindows = ScheduleConfig.defaultWakeWindows(forNapCount: wakeWindows.count)
+                            bedtimeWakeWindow = ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: wakeWindows.count)
                         }
                     }
                 }
 
                 ForEach(Array(wakeWindows.indices), id: \.self) { index in
                     let minutes = wakeWindows[index]
-                    stepperRow(
+                    ScheduleStepperRow(
                         label: "Awake before nap \(index + 1)",
                         value: FormattingHelpers.formatWakeWindowFraction(minutes: minutes),
                         canDecrement: minutes > 45,
@@ -1160,7 +1245,31 @@ private struct NapScheduleEditorSheet: View {
                     )
                 }
 
-                stepperRow(
+                ScheduleStepperRow(
+                    label: "Awake before bedtime",
+                    value: FormattingHelpers.formatWakeWindowFraction(minutes: bedtimeWakeWindow),
+                    canDecrement: bedtimeWakeWindow > 90,
+                    canIncrement: bedtimeWakeWindow < 420,
+                    onDecrement: { bedtimeWakeWindow = max(90, bedtimeWakeWindow - 15) },
+                    onIncrement: { bedtimeWakeWindow = min(420, bedtimeWakeWindow + 15) }
+                )
+
+                VStack(alignment: .leading, spacing: BLSpacing.space1) {
+                    ScheduleStepperRow(
+                        label: "Target bedtime",
+                        value: FormattingHelpers.formatMinutesFromMidnight(targetBedtime),
+                        canDecrement: targetBedtime > 1080,
+                        canIncrement: targetBedtime < 1320,
+                        onDecrement: { targetBedtime = max(1080, targetBedtime - 15) },
+                        onIncrement: { targetBedtime = min(1320, targetBedtime + 15) }
+                    )
+
+                    Text("Sleep within 45 min of target bedtime counts as night sleep.")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                ScheduleStepperRow(
                     label: "Nap cap",
                     value: FormattingHelpers.formatWakeWindowFraction(minutes: napCap),
                     canDecrement: napCap > 30,
@@ -1169,7 +1278,7 @@ private struct NapScheduleEditorSheet: View {
                     onIncrement: { napCap = min(240, napCap + 15) }
                 )
 
-                stepperRow(
+                ScheduleStepperRow(
                     label: "Backup catnap cutoff",
                     value: FormattingHelpers.formatMinutesFromMidnight(backupCutoff),
                     canDecrement: backupCutoff > 840,
@@ -1182,6 +1291,8 @@ private struct NapScheduleEditorSheet: View {
                 BLButton("Save schedule", variant: .primary, size: .lg, isBlock: true) {
                     var updated = baseConfig
                     updated.wakeWindowsMinutes = wakeWindows
+                    updated.bedtimeWakeWindowMinutes = bedtimeWakeWindow
+                    updated.targetBedtimeMinutesFromMidnight = targetBedtime
                     updated.napCapMinutes = napCap
                     updated.backupCatnapCutoffMinutesFromMidnight = backupCutoff
                     onSave(updated)
@@ -1189,15 +1300,159 @@ private struct NapScheduleEditorSheet: View {
             }
         )
     }
+}
 
-    private func stepperRow(
-        label: String,
-        value: String,
-        canDecrement: Bool,
-        canIncrement: Bool,
-        onDecrement: @escaping () -> Void,
-        onIncrement: @escaping () -> Void
-    ) -> some View {
+// MARK: - Feed & Meal Sweet Spots Editor Sheet
+
+@MainActor
+private struct FeedMealScheduleEditorSheet: View {
+    @Environment(\.blTheme) private var theme
+
+    let onClose: () -> Void
+    let onSave: (ScheduleConfig) -> Void
+
+    @State private var feedingInterval: Int
+    @State private var mealTargets: [Int]
+    @State private var minSpacingAfterFeed: Int
+    private let baseConfig: ScheduleConfig
+
+    init(
+        initialConfig: ScheduleConfig,
+        onClose: @escaping () -> Void,
+        onSave: @escaping (ScheduleConfig) -> Void
+    ) {
+        self.baseConfig = initialConfig
+        self.onClose = onClose
+        self.onSave = onSave
+        _feedingInterval = State(initialValue: min(max(initialConfig.feedingIntervalMinutes, 90), 300))
+        let sourceMeals = initialConfig.mealTargetMinutesFromMidnight.isEmpty
+            ? ScheduleConfig.defaultMealTargetMinutesFromMidnight
+            : initialConfig.mealTargetMinutesFromMidnight.sorted()
+        let clampedMeals = Array(sourceMeals.prefix(3)).map { min(max($0, 360), 1200) }
+        _mealTargets = State(initialValue: clampedMeals)
+        _minSpacingAfterFeed = State(initialValue: min(max(initialConfig.minMinutesAfterFeedForMeal, 0), 120))
+    }
+
+    private var mealCountBinding: Binding<Int> {
+        Binding(
+            get: { min(max(mealTargets.count, 1), 3) },
+            set: { newCount in
+                let targetCount = min(max(newCount, 1), 3)
+                guard targetCount != mealTargets.count else { return }
+                mealTargets = ScheduleConfig.defaultMealTargets(forMealCount: targetCount)
+            }
+        )
+    }
+
+    var body: some View {
+        BLSheetContainer(
+            isPresented: true,
+            title: "Feed & meal sweet spots",
+            showScrim: true,
+            onClose: onClose,
+            icon: {
+                BLEventIcon(kind: .feeding, size: .md)
+            },
+            content: {
+                VStack(alignment: .leading, spacing: BLSpacing.space1) {
+                    ScheduleStepperRow(
+                        label: "Time between feeds",
+                        value: FormattingHelpers.formatWakeWindowFraction(minutes: feedingInterval),
+                        canDecrement: feedingInterval > 90,
+                        canIncrement: feedingInterval < 300,
+                        onDecrement: { feedingInterval = max(90, feedingInterval - 15) },
+                        onIncrement: { feedingInterval = min(300, feedingInterval + 15) }
+                    )
+
+                    Text("Evening feeds cap 30 min before target bedtime.")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                    Text("Solid meals per day")
+                        .blMicroLabel()
+
+                    BLSegmentedControl(
+                        options: [1, 2, 3],
+                        selection: mealCountBinding,
+                        size: .md,
+                        isBlock: true
+                    ) { "\($0)" }
+
+                    HStack {
+                        Spacer()
+                        BLButton(
+                            "Reset to typical for \(mealTargets.count) \(mealTargets.count == 1 ? "meal" : "meals")",
+                            variant: .ghost,
+                            size: .sm
+                        ) {
+                            mealTargets = ScheduleConfig.defaultMealTargets(forMealCount: mealTargets.count)
+                        }
+                    }
+                }
+
+                ForEach(Array(mealTargets.indices), id: \.self) { index in
+                    let minutes = mealTargets[index]
+                    let slotLabel = FormattingHelpers.formatMealSlot(
+                        MealSlotClassifier.classify(minutesFromMidnight: minutes)
+                    )
+                    ScheduleStepperRow(
+                        label: slotLabel,
+                        value: FormattingHelpers.formatMinutesFromMidnight(minutes),
+                        canDecrement: minutes > 360,
+                        canIncrement: minutes < 1200,
+                        onDecrement: {
+                            guard index < mealTargets.count else { return }
+                            mealTargets[index] = max(360, mealTargets[index] - 15)
+                        },
+                        onIncrement: {
+                            guard index < mealTargets.count else { return }
+                            mealTargets[index] = min(1200, mealTargets[index] + 15)
+                        }
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: BLSpacing.space1) {
+                    ScheduleStepperRow(
+                        label: "Spacing after a feed",
+                        value: minSpacingAfterFeed == 0 ? "Off" : "\(minSpacingAfterFeed)m",
+                        canDecrement: minSpacingAfterFeed > 0,
+                        canIncrement: minSpacingAfterFeed < 120,
+                        onDecrement: { minSpacingAfterFeed = max(0, minSpacingAfterFeed - 15) },
+                        onIncrement: { minSpacingAfterFeed = min(120, minSpacingAfterFeed + 15) }
+                    )
+
+                    Text("Gently nudges a meal window right after a bottle or nursing session.")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+            },
+            footer: {
+                BLButton("Save rhythm", variant: .primary, size: .lg, isBlock: true) {
+                    var updated = baseConfig
+                    updated.feedingIntervalMinutes = feedingInterval
+                    updated.mealTargetMinutesFromMidnight = mealTargets.sorted()
+                    updated.minMinutesAfterFeedForMeal = minSpacingAfterFeed
+                    onSave(updated)
+                }
+            }
+        )
+    }
+}
+
+@MainActor
+private struct ScheduleStepperRow: View {
+    @Environment(\.blTheme) private var theme
+
+    let label: String
+    let value: String
+    let canDecrement: Bool
+    let canIncrement: Bool
+    let onDecrement: () -> Void
+    let onIncrement: () -> Void
+
+    var body: some View {
         HStack(spacing: BLSpacing.space3) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)

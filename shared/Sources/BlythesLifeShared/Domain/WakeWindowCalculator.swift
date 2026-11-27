@@ -1,5 +1,128 @@
 import Foundation
 
+// MARK: - Sleep Classification (Engine A1)
+
+public enum SleepClassificationZone: String, Sendable, Equatable {
+    case daytime
+    case twilight
+    case night
+}
+
+public enum SleepClassifier: Sendable {
+    /// Clearly-night sleep begins `targetBedtime - 45m` (e.g. `6:45 PM` for `7:30 PM` bedtime).
+    public static let nightLeadMinutes: Int = 45
+    /// Twilight zone begins `targetBedtime - 2h15m` (e.g. `5:15 PM` for `7:30 PM` bedtime).
+    public static let twilightLeadMinutes: Int = 135
+    /// Completed sleeps lasting at least `3.5h` (`210m`) are always classified as `.night`.
+    public static let nightDurationThresholdMinutes: Int = 210
+    /// Earliest nap start (`4:30 PM`) eligible for suggesting a switch from `.nap` to `.night`.
+    public static let lateNapSwitchSuggestionEarliestMinutesFromMidnight: Int = 990
+
+    /// Maps `date` into `.daytime`, `.twilight`, or `.night` relative to `config.targetBedtimeMinutesFromMidnight`.
+    public static func zone(
+        for date: Date,
+        config: ScheduleConfig,
+        calendar: Calendar = .current
+    ) -> SleepClassificationZone {
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let mins = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        let nightStart = max(0, config.targetBedtimeMinutesFromMidnight - nightLeadMinutes)
+        let twilightStart = max(0, config.targetBedtimeMinutesFromMidnight - twilightLeadMinutes)
+
+        if mins >= nightStart || mins < ScheduleConfig.defaultNightWindowEndMinutesFromMidnight {
+            return .night
+        } else if mins >= twilightStart {
+            return .twilight
+        } else {
+            return .daytime
+        }
+    }
+
+    /// Classifies a sleep session as `.nap` or `.night` using duration/overnight guards,
+    /// wall-clock zones anchored to `config.targetBedtimeMinutesFromMidnight`, and twilight context rules.
+    public static func classify(
+        start: Date,
+        end: Date? = nil,
+        completedNapsToday: [EventDTO] = [],
+        lastWakeAt: Date? = nil,
+        config: ScheduleConfig,
+        calendar: Calendar = .current
+    ) -> SleepType {
+        // Duration guard (when `end` is provided and valid): >= 3.5h or crossing calendar days -> `.night`.
+        if let end, end >= start {
+            if end.timeIntervalSince(start) >= Double(nightDurationThresholdMinutes * 60)
+                || !calendar.isDate(start, inSameDayAs: end)
+            {
+                return .night
+            }
+        }
+
+        switch zone(for: start, config: config, calendar: calendar) {
+        case .night:
+            return .night
+        case .daytime:
+            return .nap
+        case .twilight:
+            let components = calendar.dateComponents([.hour, .minute], from: start)
+            let mins = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+
+            if mins >= config.backupCatnapCutoffMinutesFromMidnight {
+                return .night
+            }
+
+            let validCompletedNaps = completedNapsToday.filter { event in
+                guard event.deletedAt == nil,
+                      event.eventType == .sleep,
+                      case .sleep(let sleepMeta) = event.metadata,
+                      sleepMeta.sleepType == .nap,
+                      let endedAt = event.endedAt,
+                      endedAt >= event.startedAt,
+                      calendar.isDate(event.startedAt, inSameDayAs: start)
+                else {
+                    return false
+                }
+                return true
+            }
+
+            if validCompletedNaps.count >= config.wakeWindowsMinutes.count {
+                return .night
+            }
+
+            if let wake = lastWakeAt {
+                let thresholdSeconds = Double(max(60, config.bedtimeWakeWindowMinutes - 30) * 60)
+                if start.timeIntervalSince(wake) >= thresholdSeconds {
+                    return .night
+                }
+            }
+
+            return .nap
+        }
+    }
+
+    /// Returns `true` when an in-progress late-afternoon `.nap` (started at or after `4:30 PM`)
+    /// has been running for at least `napCapMinutes + 60m`, suggesting a switch to `.night`.
+    public static func shouldSuggestSwitchToNight(
+        startedAt: Date,
+        asOf: Date,
+        sleepType: SleepType,
+        config: ScheduleConfig,
+        calendar: Calendar = .current
+    ) -> Bool {
+        guard sleepType == .nap, asOf > startedAt else {
+            return false
+        }
+        let components = calendar.dateComponents([.hour, .minute], from: startedAt)
+        let startMins = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        guard startMins >= lateNapSwitchSuggestionEarliestMinutesFromMidnight else {
+            return false
+        }
+        let elapsedMinutes = asOf.timeIntervalSince(startedAt) / 60.0
+        return elapsedMinutes >= Double(config.napCapMinutes + 60)
+    }
+}
+
+// MARK: - Next Nap Prediction (Engine B1)
+
 public struct NextNapPrediction: Codable, Sendable, Equatable, Hashable {
     public var recommendedStart: Date
     public var windowStart: Date
@@ -42,8 +165,18 @@ public enum WakeWindowCalculator: Sendable {
     /// Half-width in minutes around `recommendedStart` forming `[windowStart, windowEnd]`.
     public static let sweetSpotWindowHalfWidthMinutes: Int = 15
 
+    /// Returns `true` when `date` falls within the clearly-night sleep zone
+    /// (`>= targetBedtime - 45m` or `< defaultNightWindowEndMinutesFromMidnight`) in `calendar`.
+    public static func isWithinNightSleepWindow(
+        _ date: Date,
+        config: ScheduleConfig,
+        calendar: Calendar = .current
+    ) -> Bool {
+        SleepClassifier.zone(for: date, config: config, calendar: calendar) == .night
+    }
+
     /// Predicts the next nap window using asymmetric per-nap wake windows, short-nap reset (`< shortNapThresholdMinutes`),
-    /// per-nap duration cap (`napCapMinutes`), and the backup catnap cutoff rule.
+    /// per-nap duration cap (`napCapMinutes`), the backup catnap cutoff rule, and `SleepClassifier` bedtime transitions.
     public static func predictNextNap(
         asOf: Date,
         wakeUpTime: Date?,
@@ -52,6 +185,11 @@ public enum WakeWindowCalculator: Sendable {
         calendar: Calendar = .current
     ) -> NextNapPrediction? {
         guard !config.wakeWindowsMinutes.isEmpty else {
+            return nil
+        }
+
+        // Already clearly inside the evening/overnight night zone -> never recommend a daytime nap.
+        if isWithinNightSleepWindow(asOf, config: config, calendar: calendar) {
             return nil
         }
 
@@ -92,6 +230,17 @@ public enum WakeWindowCalculator: Sendable {
             return nil
         }
 
+        // Already in night/bedtime transition as of `asOf` -> bedtime next.
+        if SleepClassifier.classify(
+            start: asOf,
+            completedNapsToday: completedNapsToday,
+            lastWakeAt: anchorTime,
+            config: config,
+            calendar: calendar
+        ) == .night {
+            return nil
+        }
+
         let baseWakeWindowMinutes: Int
         if isBackupCatnap {
             baseWakeWindowMinutes = config.wakeWindowsMinutes.last ?? config.shortNapNextWindowMinutes
@@ -110,6 +259,18 @@ public enum WakeWindowCalculator: Sendable {
         }
 
         let recommendedStart = anchorTime.addingTimeInterval(TimeInterval(effectiveWakeWindowMinutes * 60))
+
+        // If the predicted sleep belongs to bedtime/night, transition to Bedtime instead of a late nap.
+        if SleepClassifier.classify(
+            start: recommendedStart,
+            completedNapsToday: completedNapsToday,
+            lastWakeAt: anchorTime,
+            config: config,
+            calendar: calendar
+        ) == .night {
+            return nil
+        }
+
         let windowStart = recommendedStart.addingTimeInterval(TimeInterval(-sweetSpotWindowHalfWidthMinutes * 60))
         let windowEnd = recommendedStart.addingTimeInterval(TimeInterval(sweetSpotWindowHalfWidthMinutes * 60))
 

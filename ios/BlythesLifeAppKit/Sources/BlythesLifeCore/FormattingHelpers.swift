@@ -207,6 +207,16 @@ public enum FormattingHelpers: Sendable {
         }
     }
 
+    /// Formats a canonical solid-meal slot label (`"Breakfast"`, `"Lunch"`, `"Dinner"`, `"Snack"`).
+    public static func formatMealSlot(_ slot: MealSlot) -> String {
+        switch slot {
+        case .breakfast: "Breakfast"
+        case .lunch: "Lunch"
+        case .dinner: "Dinner"
+        case .snack: "Snack"
+        }
+    }
+
     /// Returns the display title for a logged event, matching the design system voice.
     public static func eventTitle(_ event: EventDTO, napNumber: Int? = nil) -> String {
         switch event.metadata {
@@ -225,13 +235,13 @@ public enum FormattingHelpers: Sendable {
         case .diaper:
             return "Diaper"
         case .meal(let meta):
-            switch meta.mealSlot {
-            case .breakfast: return "Breakfast"
-            case .lunch: return "Lunch"
-            case .dinner: return "Dinner"
-            case .snack: return "Snack"
-            case .none: return "Meal"
+            if let slot = meta.mealSlot {
+                return formatMealSlot(slot)
             }
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: event.timezone) ?? .current
+            let inferredSlot = MealSlotClassifier.classify(date: event.startedAt, calendar: calendar)
+            return formatMealSlot(inferredSlot)
         case .bath:
             return "Bath"
         case .medicine(let meta):

@@ -105,6 +105,15 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
         timeZone: TimeZone = .current,
         preferredUnit: VolumeUnit = .oz
     ) -> [ScanReviewDraftItem] {
+        var scanCalendar = Calendar(identifier: .gregorian)
+        scanCalendar.timeZone = timeZone
+
+        let normalizedMetadata = Self.resolvedMetadata(
+            extractedDraft.metadata,
+            startedAt: extractedDraft.startedAt,
+            calendar: scanCalendar
+        )
+
         let syntheticEvent = EventDTO(
             id: extractedDraft.draftId,
             profileId: UUID(),
@@ -113,7 +122,7 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
             endedAt: extractedDraft.endedAt,
             timezone: timeZone.identifier,
             notes: extractedDraft.notes,
-            metadata: extractedDraft.metadata,
+            metadata: normalizedMetadata,
             source: .paperScan,
             createdBy: UUID(),
             updatedBy: UUID()
@@ -142,7 +151,7 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
             title: FormattingHelpers.eventTitle(syntheticEvent),
             detail: FormattingHelpers.eventDetail(syntheticEvent, preferredUnit: preferredUnit, timeZone: timeZone),
             savedDetail: nil,
-            metadata: extractedDraft.metadata,
+            metadata: normalizedMetadata,
             notes: extractedDraft.notes,
             matchAction: extractedDraft.matchAction,
             isSuggestion: extractedDraft.suggestedByDraftId != nil,
@@ -157,6 +166,11 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
 
         var items = [primary]
         if let companion = extractedDraft.suggestedCompanion {
+            let normalizedCompanionMetadata = Self.resolvedMetadata(
+                companion.metadata,
+                startedAt: companion.startedAt,
+                calendar: scanCalendar
+            )
             let companionEvent = EventDTO(
                 id: companion.draftId,
                 profileId: UUID(),
@@ -165,7 +179,7 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
                 endedAt: companion.endedAt,
                 timezone: timeZone.identifier,
                 notes: companion.notes,
-                metadata: companion.metadata,
+                metadata: normalizedCompanionMetadata,
                 source: .paperScan,
                 createdBy: UUID(),
                 updatedBy: UUID()
@@ -180,7 +194,7 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
                 title: FormattingHelpers.eventTitle(companionEvent),
                 detail: companion.reason ?? saved,
                 savedDetail: saved,
-                metadata: companion.metadata,
+                metadata: normalizedCompanionMetadata,
                 notes: companion.notes,
                 matchAction: .create,
                 isSuggestion: true,
@@ -195,6 +209,18 @@ public struct ScanReviewDraftItem: Codable, Sendable, Identifiable, Equatable, H
             items.append(suggestionDraft)
         }
         return items
+    }
+
+    private static func resolvedMetadata(
+        _ metadata: EventMetadata,
+        startedAt: Date,
+        calendar: Calendar
+    ) -> EventMetadata {
+        if case .meal(var meta) = metadata, meta.mealSlot == nil {
+            meta.mealSlot = MealSlotClassifier.classify(date: startedAt, calendar: calendar)
+            return .meal(meta)
+        }
+        return metadata
     }
 
     // MARK: - Ambiguity Candidate Parser

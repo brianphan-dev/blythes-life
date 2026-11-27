@@ -216,6 +216,12 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
     public static let defaultShortNapNextWindowMinutes = 150
     public static let defaultBackupCatnapCutoffMinutesFromMidnight = 1020 // 5:00 PM
     public static let defaultBackupCatnapDurationMinutes = 25
+    public static let defaultTargetBedtimeMinutesFromMidnight = 1170 // 7:30 PM
+    public static let defaultBedtimeWakeWindowMinutes = 225 // 3¾h (for 2 naps)
+    public static let defaultNightWindowEndMinutesFromMidnight = 360 // 6:00 AM
+    public static let defaultFeedingIntervalMinutes = 180 // 3h
+    public static let defaultMealTargetMinutesFromMidnight = [510, 750, 1050] // 8:30 AM, 12:30 PM, 5:30 PM
+    public static let defaultMinMinutesAfterFeedForMeal = 45
 
     /// Returns age-sensible default wake windows in minutes for a 1-to-4-nap daily schedule.
     public static func defaultWakeWindows(forNapCount count: Int) -> [Int] {
@@ -231,6 +237,32 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
         }
     }
 
+    /// Returns age-sensible default final wake window before bedtime in minutes for a 1-to-4-nap daily schedule.
+    public static func defaultBedtimeWakeWindow(forNapCount count: Int) -> Int {
+        switch min(max(count, 1), 4) {
+        case 1:
+            return 315 // 5¼h
+        case 2:
+            return defaultBedtimeWakeWindowMinutes // 3¾h (225m)
+        case 3:
+            return 165 // 2¾h
+        default:
+            return 120 // 2h
+        }
+    }
+
+    /// Returns age-sensible default solid-meal target times (in minutes from midnight) for a 1-to-3-meal daily schedule.
+    public static func defaultMealTargets(forMealCount count: Int) -> [Int] {
+        switch min(max(count, 1), 3) {
+        case 1:
+            return [1050] // 5:30 PM — Dinner
+        case 2:
+            return [720, 1050] // 12:00 PM Lunch, 5:30 PM Dinner
+        default:
+            return defaultMealTargetMinutesFromMidnight // 8:30 AM Breakfast, 12:30 PM Lunch, 5:30 PM Dinner
+        }
+    }
+
     public var wakeWindowsMinutes: [Int]
     public var napCapMinutes: Int
     public var shortNapThresholdMinutes: Int
@@ -239,6 +271,16 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
     public var backupCatnapDurationMinutes: Int
     public var targetDailyMilkOzMin: Double?
     public var targetDailyMilkOzMax: Double?
+    public var targetBedtimeMinutesFromMidnight: Int
+    public var bedtimeWakeWindowMinutes: Int
+    public var feedingIntervalMinutes: Int
+    public var mealTargetMinutesFromMidnight: [Int]
+    public var minMinutesAfterFeedForMeal: Int
+
+    /// Computed start of the clearly-night sleep window (`targetBedtime - 45m`, e.g. `7:30 PM` -> `6:45 PM`).
+    public var nightWindowStartMinutesFromMidnight: Int {
+        max(0, targetBedtimeMinutesFromMidnight - 45)
+    }
 
     public init(
         wakeWindowsMinutes: [Int] = ScheduleConfig.defaultWakeWindowsMinutes,
@@ -248,7 +290,12 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
         backupCatnapCutoffMinutesFromMidnight: Int = ScheduleConfig.defaultBackupCatnapCutoffMinutesFromMidnight,
         backupCatnapDurationMinutes: Int = ScheduleConfig.defaultBackupCatnapDurationMinutes,
         targetDailyMilkOzMin: Double? = nil,
-        targetDailyMilkOzMax: Double? = nil
+        targetDailyMilkOzMax: Double? = nil,
+        targetBedtimeMinutesFromMidnight: Int = ScheduleConfig.defaultTargetBedtimeMinutesFromMidnight,
+        bedtimeWakeWindowMinutes: Int? = nil,
+        feedingIntervalMinutes: Int = ScheduleConfig.defaultFeedingIntervalMinutes,
+        mealTargetMinutesFromMidnight: [Int] = ScheduleConfig.defaultMealTargetMinutesFromMidnight,
+        minMinutesAfterFeedForMeal: Int = ScheduleConfig.defaultMinMinutesAfterFeedForMeal
     ) {
         self.wakeWindowsMinutes = wakeWindowsMinutes
         self.napCapMinutes = napCapMinutes
@@ -258,6 +305,12 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
         self.backupCatnapDurationMinutes = backupCatnapDurationMinutes
         self.targetDailyMilkOzMin = targetDailyMilkOzMin
         self.targetDailyMilkOzMax = targetDailyMilkOzMax
+        self.targetBedtimeMinutesFromMidnight = targetBedtimeMinutesFromMidnight
+        self.bedtimeWakeWindowMinutes = bedtimeWakeWindowMinutes
+            ?? ScheduleConfig.defaultBedtimeWakeWindow(forNapCount: wakeWindowsMinutes.count)
+        self.feedingIntervalMinutes = feedingIntervalMinutes
+        self.mealTargetMinutesFromMidnight = mealTargetMinutesFromMidnight
+        self.minMinutesAfterFeedForMeal = minMinutesAfterFeedForMeal
     }
 
     enum CodingKeys: String, CodingKey {
@@ -269,12 +322,22 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
         case backupCatnapDurationMinutes = "backup_catnap_duration_minutes"
         case targetDailyMilkOzMin = "target_daily_milk_oz_min"
         case targetDailyMilkOzMax = "target_daily_milk_oz_max"
+        case targetBedtimeMinutesFromMidnight = "target_bedtime_minutes_from_midnight"
+        case bedtimeWakeWindowMinutes = "bedtime_wake_window_minutes"
+        case feedingIntervalMinutes = "feeding_interval_minutes"
+        case mealTargetMinutesFromMidnight = "meal_target_minutes_from_midnight"
+        case minMinutesAfterFeedForMeal = "min_minutes_after_feed_for_meal"
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case bedtimeWindowStartMinutesFromMidnight = "bedtime_window_start_minutes_from_midnight"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.wakeWindowsMinutes = try container.decodeIfPresent([Int].self, forKey: .wakeWindowsMinutes)
+        let wakeWindows = try container.decodeIfPresent([Int].self, forKey: .wakeWindowsMinutes)
             ?? Self.defaultWakeWindowsMinutes
+        self.wakeWindowsMinutes = wakeWindows
         self.napCapMinutes = try container.decodeIfPresent(Int.self, forKey: .napCapMinutes)
             ?? Self.defaultNapCapMinutes
         self.shortNapThresholdMinutes = try container.decodeIfPresent(Int.self, forKey: .shortNapThresholdMinutes)
@@ -289,6 +352,38 @@ public struct ScheduleConfig: Codable, Sendable, Equatable, Hashable {
             ?? Self.defaultBackupCatnapDurationMinutes
         self.targetDailyMilkOzMin = try container.decodeIfPresent(Double.self, forKey: .targetDailyMilkOzMin)
         self.targetDailyMilkOzMax = try container.decodeIfPresent(Double.self, forKey: .targetDailyMilkOzMax)
+        if let targetBedtime = try container.decodeIfPresent(
+            Int.self,
+            forKey: .targetBedtimeMinutesFromMidnight
+        ) {
+            self.targetBedtimeMinutesFromMidnight = targetBedtime
+        } else {
+            let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            if let legacyBedtimeStart = try legacyContainer.decodeIfPresent(
+                Int.self,
+                forKey: .bedtimeWindowStartMinutesFromMidnight
+            ) {
+                self.targetBedtimeMinutesFromMidnight = min(max(legacyBedtimeStart + 45, 1050), 1380)
+            } else {
+                self.targetBedtimeMinutesFromMidnight = Self.defaultTargetBedtimeMinutesFromMidnight
+            }
+        }
+        self.bedtimeWakeWindowMinutes = try container.decodeIfPresent(
+            Int.self,
+            forKey: .bedtimeWakeWindowMinutes
+        ) ?? Self.defaultBedtimeWakeWindow(forNapCount: wakeWindows.count)
+        self.feedingIntervalMinutes = try container.decodeIfPresent(
+            Int.self,
+            forKey: .feedingIntervalMinutes
+        ) ?? Self.defaultFeedingIntervalMinutes
+        self.mealTargetMinutesFromMidnight = try container.decodeIfPresent(
+            [Int].self,
+            forKey: .mealTargetMinutesFromMidnight
+        ) ?? Self.defaultMealTargetMinutesFromMidnight
+        self.minMinutesAfterFeedForMeal = try container.decodeIfPresent(
+            Int.self,
+            forKey: .minMinutesAfterFeedForMeal
+        ) ?? Self.defaultMinMinutesAfterFeedForMeal
     }
 }
 

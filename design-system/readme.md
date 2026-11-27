@@ -5,7 +5,7 @@ Blythe's Life is a private, offline-first baby-tracking app for one family. It h
 1. **Log daily care in under three seconds, one-handed.** Sleep, bottles, diapers, meals, baths, meds and notes, synced across the parents' iPhones and a nursery iPad.
 2. **Turn Grandma's paper log into entries.** Blythe's weekday caregiver writes on paper sheets whose layout changes as Blythe grows. A parent photographs the sheet, a vision model extracts events, and the parent reviews and confirms every entry before anything is saved.
 
-There is one product surface: a universal Apple app (iPhone, a foldable iPhone, iPad). There is no marketing site, no docs site, and no adult food diary.
+There is one product surface: a universal Apple app (iPhone, iPhone Duo, and iPad) focused entirely on family baby-care tracking.
 
 ## Sources
 

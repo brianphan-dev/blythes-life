@@ -669,6 +669,59 @@ struct FormattingHelpersTests {
         #expect(FormattingHelpers.formatExpiryCountdown(now, asOf: now) == "Expired")
         #expect(FormattingHelpers.formatExpiryCountdown(now.addingTimeInterval(-300), asOf: now) == "Expired")
     }
+
+    @Test("FormattingHelpers classifies untagged meals by local time and exposes canonical formatMealSlot")
+    func timeAwareMealTitleAndScanDraftFallback() throws {
+        let tzId = SampleSeedData.defaultTimeZoneIdentifier
+        let tz = try #require(TimeZone(identifier: tzId))
+
+        #expect(FormattingHelpers.formatMealSlot(.breakfast) == "Breakfast")
+        #expect(FormattingHelpers.formatMealSlot(.lunch) == "Lunch")
+        #expect(FormattingHelpers.formatMealSlot(.snack) == "Snack")
+        #expect(FormattingHelpers.formatMealSlot(.dinner) == "Dinner")
+
+        func untaggedMealEvent(hour: Int, minute: Int) -> EventDTO {
+            let userId = UUID()
+            return EventDTO(
+                id: UUID(),
+                profileId: SampleSeedData.profileId,
+                eventType: .meal,
+                startedAt: makeDate(hour: hour, minute: minute, timeZoneIdentifier: tzId),
+                timezone: tzId,
+                notes: "Avocado, sweet potato",
+                metadata: .meal(MealMetadata(mealSlot: nil, portionEaten: .most)),
+                createdBy: userId,
+                updatedBy: userId
+            )
+        }
+
+        #expect(FormattingHelpers.eventTitle(untaggedMealEvent(hour: 8, minute: 30)) == "Breakfast")
+        #expect(FormattingHelpers.eventTitle(untaggedMealEvent(hour: 12, minute: 30)) == "Lunch")
+        #expect(FormattingHelpers.eventTitle(untaggedMealEvent(hour: 15, minute: 0)) == "Snack")
+        #expect(FormattingHelpers.eventTitle(untaggedMealEvent(hour: 17, minute: 0)) == "Dinner")
+
+        // Verify ScanReviewDraftItem.from populates mealSlot when server draft has mealSlot == nil
+        let extractedDinner = ExtractedEventDraft(
+            eventType: .meal,
+            startedAt: makeDate(hour: 17, minute: 0, timeZoneIdentifier: tzId),
+            notes: "Pasta, peas",
+            metadata: .meal(MealMetadata(mealSlot: nil, portionEaten: .some)),
+            confidence: .high
+        )
+        let drafts = ScanReviewDraftItem.from(
+            extractedDraft: extractedDinner,
+            rowKey: "row-dinner",
+            timeZone: tz,
+            preferredUnit: .oz
+        )
+        let dinnerDraft = try #require(drafts.first)
+        #expect(dinnerDraft.title == "Dinner")
+        if case .meal(let meta) = dinnerDraft.metadata {
+            #expect(meta.mealSlot == .dinner)
+        } else {
+            Issue.record("Expected meal metadata on dinner draft")
+        }
+    }
 }
 
 // MARK: - Duo Posture Resolver Tests
@@ -1113,6 +1166,545 @@ struct BlythesLifeStoreTests {
         } else {
             Issue.record("Expected synced status after flushOutbox, got \(store.syncStatus)")
         }
+    }
+
+    @Test("Evening sleep at 7:30 PM classifies as night sleep with 1 nap or 0 naps and shows calm night sleep state")
+    func eveningNightSleepClassificationAndCardState() throws {
+        // Case 1: Only 1 daytime nap logged (demo seed), clock at 7:30 PM
+        let oneNapStore = BlythesLifeStore.makeDemo()
+        let evening = makeDate(day: 25, hour: 19, minute: 30)
+        oneNapStore.tick(now: evening)
+
+        #expect(oneNapStore.completedNapsToday.count == 1)
+        #expect(oneNapStore.shouldClassifySleepAsNight(asOf: evening) == true)
+        #expect(oneNapStore.napCardState.mode == .awake)
+        #expect(oneNapStore.napCardState.primaryActionLabel == "Start night sleep")
+
+        _ = oneNapStore.toggleNap()
+        #expect(oneNapStore.isActiveSleepNight == true)
+        #expect(oneNapStore.toast?.message == "Night sleep started on every device")
+
+        // Advance 2 hours (120m — beyond 90m daytime nap cap): still calm night sleep, no overdue nap cap alert
+        oneNapStore.tick(now: evening.addingTimeInterval(120 * 60))
+        let nightCard = oneNapStore.napCardState
+        #expect(nightCard.mode == .asleep)
+        #expect(nightCard.label == "Night sleep · since 7:30 PM")
+        #expect(nightCard.elapsedText == "2h 0m")
+        #expect(abs(nightCard.progress - (120.0 / 660.0)) < 0.001)
+        #expect(nightCard.isOver == false)
+        #expect(nightCard.captionPrefix == "Night sleep")
+        #expect(nightCard.highlightedClockTime == nil)
+        #expect(nightCard.captionSuffix == nil)
+        #expect(nightCard.fullCaption == "Night sleep")
+        #expect(nightCard.primaryActionLabel == "Wake up")
+        #expect(nightCard.secondaryActionLabel == "Change start time")
+
+        // Advance past 11h: progress caps cleanly at 1.0 and stays non-overdue
+        oneNapStore.tick(now: evening.addingTimeInterval(700 * 60))
+        #expect(oneNapStore.napCardState.progress == 1.0)
+        #expect(oneNapStore.napCardState.isOver == false)
+
+        let finishedNight = try #require(oneNapStore.toggleNap())
+        if case .sleep(let meta) = finishedNight.metadata {
+            #expect(meta.sleepType == .night)
+        } else {
+            Issue.record("Expected night sleep metadata")
+        }
+        #expect(oneNapStore.toast?.message == "Night sleep saved")
+
+        // Case 2: 0 sleeps logged today at 7:30 PM
+        let zeroNapStore = BlythesLifeStore.makeDemo()
+        zeroNapStore.events = []
+        zeroNapStore.tick(now: evening)
+
+        #expect(zeroNapStore.completedNapsToday.isEmpty)
+        #expect(zeroNapStore.shouldClassifySleepAsNight(asOf: evening) == true)
+        #expect(zeroNapStore.napCardState.captionPrefix == "Bedtime window")
+        #expect(zeroNapStore.napCardState.primaryActionLabel == "Start night sleep")
+
+        _ = zeroNapStore.toggleNap()
+        #expect(zeroNapStore.isActiveSleepNight == true)
+        #expect(zeroNapStore.napCardState.captionPrefix == "Night sleep")
+        #expect(zeroNapStore.napCardState.isOver == false)
+        #expect(zeroNapStore.toast?.message == "Night sleep started on every device")
+    }
+
+    @Test("feedSweetSpot tracks progress, next feed clock, overdue state, and suppresses overnight")
+    func feedSweetSpotPredictionsAndNightSuppression() throws {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        store.profile.scheduleConfig.feedingIntervalMinutes = 180 // 3h
+
+        let tenAM = makeDate(day: 25, hour: 10, minute: 0)
+        store.tick(now: tenAM)
+        store.logBottle(startedAt: tenAM, amount: 4.0, unit: .oz, substance: .formula)
+
+        // 1h 30m later (11:30 AM): 50% progress, next feed 1:00 PM in 1h 30m
+        let elevenThirty = makeDate(day: 25, hour: 11, minute: 30)
+        store.tick(now: elevenThirty)
+
+        let midInterval = store.feedSweetSpot
+        #expect(midInterval.title == "Last feed")
+        #expect(midInterval.primaryValue == "1h 30m")
+        #expect(midInterval.subtitle == "4 oz formula")
+        #expect(midInterval.isNursing == false)
+        #expect(abs((try #require(midInterval.progress)) - 0.5) < 0.001)
+        #expect(midInterval.isOver == false)
+        #expect(midInterval.sweetSpotPrefix == "Next ")
+        #expect(midInterval.highlightedClockTime == "1:00 PM")
+        #expect(midInterval.sweetSpotSuffix == " · in 1h 30m")
+        #expect(midInterval.fullSweetSpotCaption == "Next 1:00 PM · in 1h 30m")
+
+        // 20m past target (1:20 PM): overdue state
+        let oneTwenty = makeDate(day: 25, hour: 13, minute: 20)
+        store.tick(now: oneTwenty)
+
+        let overdue = store.feedSweetSpot
+        #expect(overdue.isOver == true)
+        #expect(abs((try #require(overdue.progress)) - (200.0 / 180.0)) < 0.001)
+        #expect(overdue.highlightedClockTime == "1:00 PM")
+        #expect(overdue.sweetSpotSuffix == " · 20m ago")
+        #expect(overdue.fullSweetSpotCaption == "Next 1:00 PM · 20m ago")
+
+        // Active night sleep at 7:30 PM suppresses feed alerts calmly
+        let sevenThirty = makeDate(day: 25, hour: 19, minute: 30)
+        store.tick(now: sevenThirty)
+        _ = store.toggleNap()
+        #expect(store.isActiveSleepNight == true)
+
+        let overnight = store.feedSweetSpot
+        #expect(overnight.progress == nil)
+        #expect(overnight.isOver == false)
+        #expect(overnight.sweetSpotPrefix == "Night sleep")
+        #expect(overnight.highlightedClockTime == nil)
+        #expect(overnight.fullSweetSpotCaption == "Night sleep")
+    }
+
+    @Test("mealSweetSpot predicts Dinner when Lunch is skipped, marks Dinner done without falling back to Lunch, and respects feed spacing")
+    func mealSweetSpotProgressionAndFeedSpacing() throws {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        // Default targets: 8:30 AM Breakfast, 12:30 PM Lunch, 5:30 PM Dinner; 45m min spacing after feed
+
+        // 1. At 4:00 PM with Lunch skipped -> predicts Dinner at 5:30 PM (not Lunch!)
+        let fourPM = makeDate(day: 25, hour: 16, minute: 0)
+        store.tick(now: fourPM)
+
+        let beforeDinner = store.mealSweetSpot
+        #expect(beforeDinner.title == "Next meal")
+        #expect(beforeDinner.primaryValue == "Dinner")
+        #expect(beforeDinner.subtitle == "None logged today")
+        #expect(beforeDinner.suggestedMealSlot == .dinner)
+        #expect(beforeDinner.isOver == false)
+        #expect(beforeDinner.sweetSpotPrefix == "Around ")
+        #expect(beforeDinner.highlightedClockTime == "5:30 PM")
+        #expect(beforeDinner.fullSweetSpotCaption == "Around 5:30 PM · in 1h 30m")
+        #expect(abs((try #require(beforeDinner.progress)) - 0.5) < 0.001)
+
+        // 2. Feed-to-meal spacing: bottle at 5:05 PM shifts 5:30 PM Dinner to 5:50 PM (5:05 + 45m)
+        let fiveOhFive = makeDate(day: 25, hour: 17, minute: 5)
+        store.tick(now: fiveOhFive)
+        store.logBottle(startedAt: fiveOhFive, amount: 3.5, unit: .oz, substance: .breastMilk)
+        store.tick(now: makeDate(day: 25, hour: 17, minute: 10))
+
+        let spacedDinner = store.mealSweetSpot
+        #expect(spacedDinner.title == "Next meal")
+        #expect(spacedDinner.primaryValue == "Dinner")
+        #expect(spacedDinner.suggestedMealSlot == .dinner)
+        #expect(spacedDinner.sweetSpotPrefix == "After feed · ")
+        #expect(spacedDinner.highlightedClockTime == "5:50 PM")
+        #expect(spacedDinner.fullSweetSpotCaption == "After feed · 5:50 PM · in 40m")
+
+        // 3. Logging a single untagged meal at 5:00 PM marks Dinner done — does NOT fall back to Lunch!
+        let fivePM = makeDate(day: 25, hour: 17, minute: 0)
+        let untaggedDinner = EventDTO(
+            id: UUID(),
+            profileId: store.profile.id,
+            eventType: .meal,
+            startedAt: fivePM,
+            timezone: store.profile.defaultTimezone,
+            notes: "Salmon, avocado",
+            metadata: .meal(MealMetadata(mealSlot: nil, portionEaten: .most)),
+            createdBy: store.currentUserId,
+            updatedBy: store.currentUserId
+        )
+        store.events.append(untaggedDinner)
+        store.tick(now: makeDate(day: 25, hour: 17, minute: 30))
+
+        let afterDinner = store.mealSweetSpot
+        #expect(afterDinner.title == "Last meal")
+        #expect(afterDinner.primaryValue == "30m")
+        #expect(afterDinner.subtitle == "Dinner · Salmon, avocado · Most eaten")
+        #expect(afterDinner.progress == nil)
+        #expect(afterDinner.isOver == false)
+        #expect(afterDinner.sweetSpotPrefix == "Done for today")
+        #expect(afterDinner.highlightedClockTime == nil)
+        #expect(afterDinner.suggestedMealSlot == nil)
+    }
+
+    @Test("classifySleep covers 3 zones, twilight context, 3.5h duration guard, and overnight midnight crossing")
+    func classifySleepZonesDurationAndMidnightCrossing() {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        store.profile.scheduleConfig = ScheduleConfig(
+            wakeWindowsMinutes: [150, 195],
+            napCapMinutes: 90,
+            backupCatnapCutoffMinutesFromMidnight: 1020, // 5:00 PM
+            targetBedtimeMinutesFromMidnight: 1170, // 7:30 PM -> twilight 5:15 PM, night 6:45 PM
+            bedtimeWakeWindowMinutes: 225 // 3h 45m
+        )
+
+        let onePM = makeDate(day: 25, hour: 13, minute: 0)
+        store.tick(now: onePM)
+
+        // 1. Daytime zone (< 5:15 PM) -> .nap
+        #expect(store.classifySleep(start: onePM) == .nap)
+        #expect(store.shouldClassifySleepAsNight(asOf: onePM) == false)
+
+        // 2. Clearly-night zone (>= 6:45 PM or < 6:00 AM) -> .night
+        let sixFortyFivePM = makeDate(day: 25, hour: 18, minute: 45)
+        let twoThirtyAM = makeDate(day: 25, hour: 2, minute: 30)
+        #expect(store.classifySleep(start: sixFortyFivePM) == .night)
+        #expect(store.shouldClassifySleepAsNight(asOf: sixFortyFivePM) == true)
+        #expect(store.classifySleep(start: twoThirtyAM) == .night)
+        #expect(store.shouldClassifySleepAsNight(asOf: twoThirtyAM) == true)
+
+        // 3. Twilight zone (5:15 PM ..< 6:45 PM): past backup cutoff -> .night
+        let fiveTwentyPM = makeDate(day: 25, hour: 17, minute: 20)
+        store.tick(now: fiveTwentyPM)
+        #expect(store.classifySleep(start: fiveTwentyPM) == .night)
+
+        // Twilight before backup cutoff: short wake + incomplete naps -> .nap; long wake or all naps done -> .night
+        store.profile.scheduleConfig.backupCatnapCutoffMinutesFromMidnight = 1080 // 6:00 PM
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 14, minute: 30),
+            end: makeDate(day: 25, hour: 15, minute: 30)
+        )
+        // Awake 1h 50m (< 225 - 30 = 195m) and only 1/2 naps -> .nap
+        #expect(store.classifySleep(start: fiveTwentyPM) == .nap)
+
+        // With 2 completed naps today -> .night in twilight
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 9, minute: 0),
+            end: makeDate(day: 25, hour: 10, minute: 30)
+        )
+        #expect(store.classifySleep(start: fiveTwentyPM) == .night)
+
+        // With only 1 nap ending at 2:00 PM (awake 3h 20m = 200m >= 195m threshold) -> .night in twilight
+        store.events = []
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 12, minute: 30),
+            end: makeDate(day: 25, hour: 14, minute: 0)
+        )
+        #expect(store.classifySleep(start: fiveTwentyPM) == .night)
+
+        // 4. 3.5h (210m) duration guard overrides daytime zone
+        #expect(store.classifySleep(start: onePM, end: makeDate(day: 25, hour: 16, minute: 29)) == .nap)
+        #expect(store.classifySleep(start: onePM, end: makeDate(day: 25, hour: 16, minute: 30)) == .night)
+
+        // 5. Overnight midnight crossing classifies as .night even when < 3.5h
+        let elevenFortyFivePM = makeDate(day: 25, hour: 23, minute: 45)
+        let twelveFifteenAMNextDay = makeDate(day: 26, hour: 0, minute: 15)
+        #expect(store.classifySleep(start: elevenFortyFivePM, end: twelveFifteenAMNextDay) == .night)
+    }
+
+    @Test("switchActiveSleepType flips active nap to night sleep, updates card and outbox, and Undo restores nap")
+    func switchActiveSleepTypeAndUndo() throws {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        store.profile.scheduleConfig = ScheduleConfig()
+
+        let fourFortyFivePM = makeDate(day: 25, hour: 16, minute: 45)
+        store.tick(now: fourFortyFivePM)
+        _ = store.toggleNap()
+
+        #expect(store.isActiveNap == true)
+        #expect(store.isActiveSleepNight == false)
+        #expect(store.napCardState.captionPrefix == "Nap cap ")
+
+        // Attach a crib location on the open sleep event to verify preservation across type switching.
+        let openIdx = try #require(store.events.firstIndex(where: { $0.eventType == .sleep && $0.endedAt == nil }))
+        let openEventId = store.events[openIdx].id
+        store.events[openIdx].metadata = .sleep(SleepMetadata(sleepType: .nap, location: .crib))
+
+        // Advance 2h 35m -> 7:20 PM: late nap overdue & eligible for switch-to-night suggestion.
+        let sevenTwentyPM = fourFortyFivePM.addingTimeInterval(155 * 60)
+        store.tick(now: sevenTwentyPM)
+        #expect(store.shouldSuggestSwitchActiveSleepToNight == true)
+        #expect(store.napCardState.isOver == true)
+
+        // Switch active nap -> night sleep
+        store.switchActiveSleepType(.night)
+
+        #expect(store.isActiveSleepNight == true)
+        #expect(store.isActiveNap == false)
+        #expect(store.shouldSuggestSwitchActiveSleepToNight == false)
+        #expect(store.napCardState.mode == .asleep)
+        #expect(store.napCardState.label == "Night sleep · since 4:45 PM")
+        #expect(store.napCardState.captionPrefix == "Night sleep")
+        #expect(store.napCardState.isOver == false)
+        #expect(store.toast?.message == "Switched to night sleep")
+        #expect(store.toast?.canUndo == true)
+
+        let outboxNightItem = try #require(store.outbox.first(where: { $0.entityKind == .event && $0.entityId == openEventId }))
+        let decodedNight = try #require(try outboxNightItem.decodedEvent())
+        if case .sleep(let meta) = decodedNight.metadata {
+            #expect(meta.sleepType == .night)
+            #expect(meta.location == .crib)
+        } else {
+            Issue.record("Expected sleep metadata in outbox after switching to night")
+        }
+
+        // Undo restores `.nap` metadata, card state, and re-enqueues outbox
+        store.undoLastToast()
+        #expect(store.isActiveSleepNight == false)
+        #expect(store.isActiveNap == true)
+        #expect(store.shouldSuggestSwitchActiveSleepToNight == true)
+        #expect(store.napCardState.captionPrefix == "Nap cap ")
+
+        let outboxRevertedItem = try #require(store.outbox.first(where: { $0.entityKind == .event && $0.entityId == openEventId }))
+        let decodedReverted = try #require(try outboxRevertedItem.decodedEvent())
+        if case .sleep(let meta) = decodedReverted.metadata {
+            #expect(meta.sleepType == .nap)
+            #expect(meta.location == .crib)
+        } else {
+            Issue.record("Expected restored nap metadata in outbox after Undo")
+        }
+
+        // Switching to night then back to nap directly emits the calm nap toast
+        store.switchActiveSleepType(.night)
+        store.switchActiveSleepType(.nap)
+        #expect(store.isActiveNap == true)
+        #expect(store.toast?.message == "Switched to nap")
+    }
+
+    @Test("shouldSuggestSwitchActiveSleepToNight triggers for late 4:45 PM nap running 2h 35m and ignores earlier/shorter naps")
+    func shouldSuggestSwitchActiveSleepToNightThresholds() {
+        // Late 4:45 PM nap
+        let lateStore = BlythesLifeStore.makeDemo()
+        lateStore.events = []
+        lateStore.profile.scheduleConfig = ScheduleConfig() // napCapMinutes = 90 -> threshold 150m (2h 30m)
+
+        let fourFortyFivePM = makeDate(day: 25, hour: 16, minute: 45)
+        lateStore.tick(now: fourFortyFivePM)
+        _ = lateStore.toggleNap()
+        #expect(lateStore.isActiveNap == true)
+
+        // At 2h 25m (145m < 150m): not yet suggested
+        lateStore.tick(now: fourFortyFivePM.addingTimeInterval(145 * 60))
+        #expect(lateStore.shouldSuggestSwitchActiveSleepToNight == false)
+
+        // At 2h 35m (155m >= 150m): suggested
+        lateStore.tick(now: fourFortyFivePM.addingTimeInterval(155 * 60))
+        #expect(lateStore.shouldSuggestSwitchActiveSleepToNight == true)
+
+        // Earlier 4:15 PM nap (< 4:30 PM cutoff) running 2h 35m: not suggested
+        let earlyStore = BlythesLifeStore.makeDemo()
+        earlyStore.events = []
+        earlyStore.profile.scheduleConfig = ScheduleConfig()
+
+        let fourFifteenPM = makeDate(day: 25, hour: 16, minute: 15)
+        earlyStore.tick(now: fourFifteenPM)
+        _ = earlyStore.toggleNap()
+        earlyStore.tick(now: fourFifteenPM.addingTimeInterval(155 * 60))
+        #expect(earlyStore.shouldSuggestSwitchActiveSleepToNight == false)
+    }
+
+    @Test("morningWakeToday and classifyMealSlot handle late-wake Breakfast, duplicate lunch, exclusion, and 5:00 PM Dinner")
+    func classifyMealSlotContextualRules() {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        let tenFortyFiveAM = makeDate(day: 25, hour: 10, minute: 45)
+        store.tick(now: tenFortyFiveAM)
+
+        // No night sleep ended today -> morningWakeToday is nil (even if a daytime nap exists)
+        #expect(store.morningWakeToday == nil)
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 9, minute: 0),
+            end: makeDate(day: 25, hour: 10, minute: 0)
+        )
+        #expect(store.morningWakeToday == nil)
+        #expect(store.classifyMealSlot(for: tenFortyFiveAM) == .lunch)
+
+        // Overnight night sleep ending at 8:30 AM today enables late-wake Breakfast anchor (8:30 AM + 2h 15m = 10:45 AM)
+        let eightThirtyAM = makeDate(day: 25, hour: 8, minute: 30)
+        _ = store.logPastSleep(
+            isNap: false,
+            start: makeDate(day: 24, hour: 20, minute: 0),
+            end: eightThirtyAM
+        )
+        #expect(store.morningWakeToday == eightThirtyAM)
+        #expect(store.classifyMealSlot(for: tenFortyFiveAM) == .breakfast)
+
+        // Duplicate lunch guard: 12:00 PM lunch -> 2:00 PM classifies as .snack
+        let noon = makeDate(day: 25, hour: 12, minute: 0)
+        let twoPM = makeDate(day: 25, hour: 14, minute: 0)
+        let lunchEvent = store.logMeal(startedAt: noon, slot: .lunch, ate: "Avocado toast")
+        #expect(store.classifyMealSlot(for: twoPM) == .snack)
+        // Excluding the lunch event itself keeps 12:00 PM as .lunch (e.g. when editing)
+        #expect(store.classifyMealSlot(for: noon, excludingEventId: lunchEvent.id) == .lunch)
+
+        // Single 5:00 PM meal on an empty day classifies as .dinner
+        store.events = []
+        let fivePM = makeDate(day: 25, hour: 17, minute: 0)
+        store.tick(now: fivePM)
+        #expect(store.classifyMealSlot(for: fivePM) == .dinner)
+    }
+
+    @Test("napCardState uses profile bedtimeWakeWindowMinutes and clamps late-catnap bedtime to targetBedtime")
+    func napCardStateBedtimeWakeWindowAndClamp() {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        store.profile.scheduleConfig = ScheduleConfig(
+            wakeWindowsMinutes: [150, 195],
+            napCapMinutes: 90,
+            backupCatnapCutoffMinutesFromMidnight: 1020, // 5:00 PM
+            targetBedtimeMinutesFromMidnight: 1170, // 7:30 PM
+            bedtimeWakeWindowMinutes: 225 // 3h 45m
+        )
+
+        // Complete both scheduled naps (Nap 2 ends 3:15 PM -> raw bedtime = 3:15 + 3h 45m = 7:00 PM)
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 9, minute: 0),
+            end: makeDate(day: 25, hour: 10, minute: 30)
+        )
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 13, minute: 45),
+            end: makeDate(day: 25, hour: 15, minute: 15)
+        )
+
+        store.tick(now: makeDate(day: 25, hour: 17, minute: 15))
+        let normalBedtimeCard = store.napCardState
+        #expect(normalBedtimeCard.mode == .awake)
+        #expect(normalBedtimeCard.highlightedClockTime == "7:00 PM")
+        #expect(normalBedtimeCard.fullCaption == "Bedtime sweet spot 7:00 PM · in 1h 45m")
+        #expect(abs(normalBedtimeCard.progress - (120.0 / 225.0)) < 0.001)
+
+        // Late catnap ending at 5:30 PM -> raw bedtime 9:15 PM (> 7:30 PM + 45m).
+        // Once now >= 6:00 PM (targetBedtime - 90m), clamp to 7:30 PM target bedtime.
+        _ = store.logPastSleep(
+            isNap: true,
+            start: makeDate(day: 25, hour: 17, minute: 5),
+            end: makeDate(day: 25, hour: 17, minute: 30)
+        )
+        store.tick(now: makeDate(day: 25, hour: 18, minute: 15))
+        let clampedBedtimeCard = store.napCardState
+        #expect(clampedBedtimeCard.mode == .awake)
+        #expect(clampedBedtimeCard.highlightedClockTime == "7:30 PM")
+        #expect(clampedBedtimeCard.fullCaption == "Bedtime sweet spot 7:30 PM · in 1h 15m")
+        #expect(abs(clampedBedtimeCard.progress - (45.0 / 120.0)) < 0.001)
+    }
+
+    @Test("feedSweetSpot handles Bedtime feed cap with smooth progress and honest Light feed cue without fake timer")
+    func feedSweetSpotBedtimeCapAndLightFeedCue() throws {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        store.profile.scheduleConfig = ScheduleConfig(
+            targetBedtimeMinutesFromMidnight: 1170, // 7:30 PM -> bedtime feed cap 7:00 PM
+            feedingIntervalMinutes: 180 // 3h
+        )
+
+        // 1. Bedtime feed cap: 5:00 PM full bottle -> raw 8:00 PM capped to 7:00 PM bedtime feed
+        let fivePM = makeDate(day: 25, hour: 17, minute: 0)
+        store.tick(now: fivePM)
+        store.logBottle(startedAt: fivePM, amount: 4.0, unit: .oz, substance: .formula)
+
+        // At 6:00 PM: halfway across the 2h span (5:00 PM -> 7:00 PM)
+        store.tick(now: makeDate(day: 25, hour: 18, minute: 0))
+        let bedtimeFeedCard = store.feedSweetSpot
+        #expect(bedtimeFeedCard.sweetSpotPrefix == "Bedtime feed ")
+        #expect(bedtimeFeedCard.highlightedClockTime == "7:00 PM")
+        #expect(bedtimeFeedCard.sweetSpotSuffix == " · in 1h 0m")
+        #expect(bedtimeFeedCard.fullSweetSpotCaption == "Bedtime feed 7:00 PM · in 1h 0m")
+        #expect(bedtimeFeedCard.isOver == false)
+        #expect(abs((try #require(bedtimeFeedCard.progress)) - 0.5) < 0.001)
+
+        // At 7:10 PM: 10m past bedtime feed cap
+        store.tick(now: makeDate(day: 25, hour: 19, minute: 10))
+        let overdueBedtimeFeed = store.feedSweetSpot
+        #expect(overdueBedtimeFeed.isOver == true)
+        #expect(overdueBedtimeFeed.sweetSpotPrefix == "Bedtime feed ")
+        #expect(overdueBedtimeFeed.highlightedClockTime == "7:00 PM")
+        #expect(overdueBedtimeFeed.sweetSpotSuffix == " · 10m ago")
+        #expect(overdueBedtimeFeed.fullSweetSpotCaption == "Bedtime feed 7:00 PM · 10m ago")
+        #expect(abs((try #require(overdueBedtimeFeed.progress)) - (130.0 / 120.0)) < 0.001)
+
+        // 2. Light feed (< 45 ml bottle without nearby solid meal) -> honest calm cue with no fake timer
+        store.events = []
+        let tenAM = makeDate(day: 25, hour: 10, minute: 0)
+        store.tick(now: tenAM)
+        store.logBottle(startedAt: tenAM, amount: 1.0, unit: .oz, substance: .breastMilk)
+
+        store.tick(now: makeDate(day: 25, hour: 10, minute: 20))
+        let lightFeedCard = store.feedSweetSpot
+        #expect(lightFeedCard.progress == nil)
+        #expect(lightFeedCard.isOver == false)
+        #expect(lightFeedCard.sweetSpotPrefix == "Light feed · may want more soon")
+        #expect(lightFeedCard.highlightedClockTime == nil)
+        #expect(lightFeedCard.sweetSpotSuffix == nil)
+        #expect(lightFeedCard.fullSweetSpotCaption == "Light feed · may want more soon")
+
+        // A solid meal within ±45m turns the small bottle into a normal top-off with standard next feed timer
+        store.logMeal(startedAt: makeDate(day: 25, hour: 10, minute: 15), slot: .breakfast, ate: "Oatmeal")
+        let normalAfterMeal = store.feedSweetSpot
+        #expect(normalAfterMeal.sweetSpotPrefix == "Next ")
+        #expect(normalAfterMeal.highlightedClockTime == "1:00 PM")
+        #expect(normalAfterMeal.progress != nil)
+    }
+
+    @Test("mealSweetSpot shows Waiting until after nap when active nap overlaps lunch window")
+    func mealSweetSpotWaitingUntilAfterNap() {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        store.profile.scheduleConfig = ScheduleConfig() // 8:30 AM Breakfast, 12:30 PM Lunch, 5:30 PM Dinner
+
+        let eightThirtyAM = makeDate(day: 25, hour: 8, minute: 30)
+        store.tick(now: eightThirtyAM)
+        store.logMeal(startedAt: eightThirtyAM, slot: .breakfast, ate: "Banana")
+
+        // Start a daytime nap at 11:30 AM
+        let elevenThirtyAM = makeDate(day: 25, hour: 11, minute: 30)
+        store.tick(now: elevenThirtyAM)
+        _ = store.toggleNap()
+        #expect(store.isActiveNap == true)
+
+        // At 11:45 AM (45m before lunch, outside 20m window): standard countdown
+        store.tick(now: makeDate(day: 25, hour: 11, minute: 45))
+        let beforeWindow = store.mealSweetSpot
+        #expect(beforeWindow.sweetSpotPrefix == "Around ")
+        #expect(beforeWindow.highlightedClockTime == "12:30 PM")
+        #expect(beforeWindow.progress != nil)
+
+        // At 12:15 PM (within 20m of 12:30 PM lunch while nap is active): calm waiting state
+        store.tick(now: makeDate(day: 25, hour: 12, minute: 15))
+        let waitingLunch = store.mealSweetSpot
+        #expect(waitingLunch.title == "Next meal")
+        #expect(waitingLunch.primaryValue == "Lunch")
+        #expect(waitingLunch.subtitle == "Last: Breakfast · 8:30 AM")
+        #expect(waitingLunch.progress == nil)
+        #expect(waitingLunch.isOver == false)
+        #expect(waitingLunch.sweetSpotPrefix == "Waiting until after nap")
+        #expect(waitingLunch.highlightedClockTime == nil)
+        #expect(waitingLunch.sweetSpotSuffix == nil)
+        #expect(waitingLunch.fullSweetSpotCaption == "Waiting until after nap")
+        #expect(waitingLunch.suggestedMealSlot == .lunch)
+
+        // Wake up at 12:40 PM: resumes normal lunch countdown
+        store.tick(now: makeDate(day: 25, hour: 12, minute: 40))
+        _ = store.toggleNap()
+        #expect(store.isActiveNap == false)
+        let afterNapLunch = store.mealSweetSpot
+        #expect(afterNapLunch.sweetSpotPrefix == "Around ")
+        #expect(afterNapLunch.highlightedClockTime == "12:30 PM")
+        #expect(afterNapLunch.sweetSpotSuffix == " · 10m ago")
+        #expect(afterNapLunch.isOver == true)
+        #expect(afterNapLunch.progress != nil)
     }
 }
 

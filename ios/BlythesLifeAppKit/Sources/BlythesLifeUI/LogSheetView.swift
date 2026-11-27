@@ -24,6 +24,11 @@ public struct LogSheetView: View {
         case manual = "Enter minutes"
     }
 
+    private enum PumpInputMode: String, CaseIterable, Hashable {
+        case manual = "Enter details"
+        case timer = "Timer"
+    }
+
     private enum DiaperSelection: String, CaseIterable, Hashable {
         case none = "None"
         case small = "S"
@@ -90,6 +95,7 @@ public struct LogSheetView: View {
     private static let bottleMlPresets = ["60", "75", "90", "100", "120", "150"]
     private static let pumpOzPresets = ["2", "3", "4", "5", "6", "8"]
     private static let pumpMlPresets = ["60", "90", "120", "150", "180", "240"]
+    private static let pumpMinutePresets = ["10", "15", "20", "25", "30"]
     private static let nurseMinutePresets = ["5", "10", "15", "20", "25", "30"]
     private static let relativeAgoOptions: [(minutes: Int, label: String)] = [
         (0, "Now"),
@@ -121,15 +127,20 @@ public struct LogSheetView: View {
     @State private var substance: FeedingSubstance = .formula
     @State private var includeVitaminD: Bool = false
     @State private var pumpSide: BreastSide = .both
+    @State private var pumpMode: PumpInputMode
+    @State private var pumpDurationText: String
 
     // Nursing state
     @State private var nursingMode: NursingInputMode = .timer
     @State private var nursingMinutesText: String = "10"
     @State private var nursingSide: BreastSide = .left
+    @State private var nursingLastSide: BreastSide
 
     // Diaper state
     @State private var peeSelection: DiaperSelection = .medium
     @State private var poopSelection: DiaperSelection = .none
+    @State private var poopColor: PoopColor?
+    @State private var poopConsistency: PoopConsistency?
     @State private var diaperRash: Bool = false
 
     // Meal state
@@ -185,11 +196,26 @@ public struct LogSheetView: View {
         var initUnit = preferredUnit
         var initSubstance: FeedingSubstance = .formula
         var initPumpSide: BreastSide = .both
+        let initPumpMode: PumpInputMode = (store.activePump != nil && request.editingEvent == nil) ? .timer : .manual
+        var initPumpDuration = ""
+        if request.kind == .pump && request.editingEvent == nil, let activePump = store.activePump {
+            initPumpSide = activePump.side
+            initAmount = ""
+        }
         var initNurseMode: NursingInputMode = .timer
         var initNurseMinutes = "10"
-        var initNurseSide: BreastSide = .left
+        var initNurseSide: BreastSide = {
+            switch store.lastNursingSideInfo?.side {
+            case .left: .right
+            case .right: .left
+            case .both, .none: .left
+            }
+        }()
+        var initNurseLastSide: BreastSide = initNurseSide == .left ? .right : .left
         var initPee: DiaperSelection = .medium
         var initPoop: DiaperSelection = .none
+        var initPoopColor: PoopColor? = nil
+        var initPoopConsistency: PoopConsistency? = nil
         var initRash = false
         var initSlot = store.classifyMealSlot(for: initExact)
         var initAte = ""
@@ -222,6 +248,11 @@ public struct LogSheetView: View {
                         ?? max(1, Double((meta.leftDurationSeconds ?? 0) + (meta.rightDurationSeconds ?? 0)) / 60.0)
                     initNurseMinutes = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
                     initNurseSide = meta.side ?? .left
+                    if let storedLast = meta.lastSide, storedLast == .left || storedLast == .right {
+                        initNurseLastSide = storedLast
+                    } else {
+                        initNurseLastSide = meta.side == .left ? .left : .right
+                    }
                 } else {
                     initUnit = meta.displayUnit
                     if let ml = meta.amountMl {
@@ -242,12 +273,22 @@ public struct LogSheetView: View {
                         displayed,
                         maxFractionDigits: initUnit == .oz ? 2 : 1
                     )
+                } else {
+                    initAmount = ""
                 }
                 initPumpSide = meta.side
+                if let mins = meta.durationMinutes
+                    ?? editing.endedAt.map({ max(0, $0.timeIntervalSince(editing.startedAt) / 60.0) }),
+                   mins > 0
+                {
+                    initPumpDuration = FormattingHelpers.formatNumber(mins, maxFractionDigits: 1)
+                }
 
             case .diaper(let meta):
                 initPee = DiaperSelection.from(meta.peeSize)
                 initPoop = DiaperSelection.from(meta.poopSize)
+                initPoopColor = meta.poopSize == nil ? nil : meta.poopColor
+                initPoopConsistency = meta.poopSize == nil ? nil : meta.poopConsistency
                 initRash = meta.rash
 
             case .meal(let meta):
@@ -295,11 +336,16 @@ public struct LogSheetView: View {
         _volumeUnit = State(initialValue: initUnit)
         _substance = State(initialValue: initSubstance)
         _pumpSide = State(initialValue: initPumpSide)
+        _pumpMode = State(initialValue: initPumpMode)
+        _pumpDurationText = State(initialValue: initPumpDuration)
         _nursingMode = State(initialValue: initNurseMode)
         _nursingMinutesText = State(initialValue: initNurseMinutes)
         _nursingSide = State(initialValue: initNurseSide)
+        _nursingLastSide = State(initialValue: initNurseLastSide)
         _peeSelection = State(initialValue: initPee)
         _poopSelection = State(initialValue: initPoop)
+        _poopColor = State(initialValue: initPoopColor)
+        _poopConsistency = State(initialValue: initPoopConsistency)
         _diaperRash = State(initialValue: initRash)
         _mealSlot = State(initialValue: initSlot)
         _userSelectedMealSlot = State(initialValue: request.editingEvent != nil)
@@ -327,6 +373,10 @@ public struct LogSheetView: View {
         request.kind == .nursing && !isEditing && (store.activeNursing != nil || nursingMode == .timer)
     }
 
+    private var isPumpTimerMode: Bool {
+        request.kind == .pump && !isEditing && (store.activePump != nil || pumpMode == .timer)
+    }
+
     private func resolvedCommitTimestamp() -> Date {
         if usesCustomTime {
             return exactTime
@@ -335,7 +385,7 @@ public struct LogSheetView: View {
     }
 
     private var timeRowLabel: String? {
-        if request.kind == .sleep || isNursingTimerMode {
+        if request.kind == .sleep || isNursingTimerMode || isPumpTimerMode {
             return nil
         }
         if request.kind == .nursing {
@@ -387,8 +437,13 @@ public struct LogSheetView: View {
                 return store.activeNursing != nil
             }
             return (Double(nursingMinutesText) ?? 0) > 0
-        case .feeding, .pump:
+        case .feeding:
             return (Double(amountText) ?? 0) > 0
+        case .pump:
+            if isPumpTimerMode {
+                return store.activePump != nil
+            }
+            return (Double(amountText) ?? 0) > 0 || (Double(pumpDurationText) ?? 0) > 0
         case .diaper, .meal, .bath, .medicine, .note:
             return true
         }
@@ -429,8 +484,20 @@ public struct LogSheetView: View {
             return "Log \(mins) min nursing"
 
         case .pump:
-            let shown = amountText.isEmpty ? "0" : amountText
-            return "Log \(shown) \(volumeUnitLabel(volumeUnit)) pumped"
+            let parsedAmount = max(0, Double(amountText) ?? 0)
+            let parsedDuration = max(0, Double(pumpDurationText) ?? 0)
+            var parts: [String] = []
+            if parsedAmount > 0 {
+                parts.append(FormattingHelpers.formatAmount(parsedAmount, unit: volumeUnit))
+            }
+            if parsedDuration > 0 {
+                let mins = FormattingHelpers.formatNumber(parsedDuration, maxFractionDigits: 1)
+                parts.append("\(mins)m")
+            }
+            if parts.isEmpty {
+                return "Log pump"
+            }
+            return "Log \(parts.joined(separator: " · ")) pumped"
 
         case .diaper:
             return "Log diaper"
@@ -491,11 +558,29 @@ public struct LogSheetView: View {
                             store.discardNursing()
                             onClose()
                         }
+                    } else if isPumpTimerMode && store.activePump != nil {
+                        BLButton(
+                            icon: BLSymbol.trash,
+                            accessibilityLabel: "Discard timer",
+                            variant: .danger,
+                            size: .lg
+                        ) {
+                            store.discardPumpTimer()
+                            onClose()
+                        }
                     }
 
                     if isNursingTimerMode {
                         LiveNursingCommitButton(
                             store: store,
+                            canCommit: canCommit,
+                            action: commit
+                        )
+                    } else if isPumpTimerMode {
+                        LivePumpCommitButton(
+                            store: store,
+                            amountText: amountText,
+                            volumeUnit: volumeUnit,
                             canCommit: canCommit,
                             action: commit
                         )
@@ -651,6 +736,8 @@ public struct LogSheetView: View {
                 if store.activeNursing != nil {
                     LiveNursingTimerSection(store: store)
                 } else {
+                    let lastInfo = store.lastNursingSideInfo
+
                     BLSegmentedControl(
                         options: NursingInputMode.allCases,
                         selection: $nursingMode,
@@ -660,14 +747,19 @@ public struct LogSheetView: View {
                     BLNursingTimer(
                         leftSeconds: 0,
                         rightSeconds: 0,
-                        activeSide: nil
+                        activeSide: nil,
+                        lastSide: lastInfo?.side.rawValue
                     ) { sideId in
                         store.tapNursingSide(sideId == "right" ? .right : .left)
                     }
 
-                    Text("Tap a side to start the timer.")
-                        .blTextRole(.callout)
-                        .foregroundStyle(theme.textSecondary)
+                    Text(
+                        lastInfo.map { last in
+                            "Last time ended on \(sideShortLabel(last.side)) · \(FormattingHelpers.formatClock(last.at, timeZone: store.profileTimeZone)). Tap a side to start."
+                        } ?? "Tap a side to start the timer."
+                    )
+                    .blTextRole(.callout)
+                    .foregroundStyle(theme.textSecondary)
                 }
             }
         } else {
@@ -693,29 +785,110 @@ public struct LogSheetView: View {
                         size: .lg,
                         isBlock: true
                     ) { sideShortLabel($0) }
+
+                    if !isEditing, let last = store.lastNursingSideInfo {
+                        Text(
+                            "Last ended on \(sideShortLabel(last.side)) at \(FormattingHelpers.formatClock(last.at, timeZone: store.profileTimeZone))."
+                        )
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                    }
+                }
+
+                if nursingSide == .both {
+                    labeledField("Ended on") {
+                        BLSegmentedControl(
+                            options: [BreastSide.left, .right],
+                            selection: $nursingLastSide,
+                            size: .md,
+                            isBlock: true
+                        ) { sideShortLabel($0) }
+                    }
                 }
             }
         }
     }
 
+    @ViewBuilder
     private var pumpForm: some View {
-        VStack(alignment: .leading, spacing: BLSpacing.space5) {
-            volumeAmountRow
+        if isPumpTimerMode {
+            VStack(alignment: .leading, spacing: BLSpacing.space4) {
+                if store.activePump == nil {
+                    BLSegmentedControl(
+                        options: PumpInputMode.allCases,
+                        selection: $pumpMode,
+                        isBlock: true
+                    ) { $0.rawValue }
+                }
 
-            presetChipsRow(
-                presets: volumeUnit == .oz ? Self.pumpOzPresets : Self.pumpMlPresets,
-                selected: amountText
-            ) { chosen in
-                amountText = chosen
+                LivePumpTimerSection(
+                    store: store,
+                    idleSide: $pumpSide,
+                    onStartTimer: {
+                        amountText = ""
+                    }
+                )
+
+                if store.activePump != nil {
+                    labeledField("Output (optional)") {
+                        VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                            volumeAmountRow
+
+                            presetChipsRow(
+                                presets: volumeUnit == .oz ? Self.pumpOzPresets : Self.pumpMlPresets,
+                                selected: amountText
+                            ) { chosen in
+                                amountText = (amountText == chosen ? "" : chosen)
+                            }
+                        }
+                    }
+                }
             }
+        } else {
+            VStack(alignment: .leading, spacing: BLSpacing.space5) {
+                if !isEditing {
+                    BLSegmentedControl(
+                        options: PumpInputMode.allCases,
+                        selection: $pumpMode,
+                        isBlock: true
+                    ) { $0.rawValue }
+                }
 
-            labeledField("Side") {
-                BLSegmentedControl(
-                    options: [BreastSide.left, .right, .both],
-                    selection: $pumpSide,
-                    size: .lg,
-                    isBlock: true
-                ) { sideShortLabel($0) }
+                volumeAmountRow
+
+                presetChipsRow(
+                    presets: volumeUnit == .oz ? Self.pumpOzPresets : Self.pumpMlPresets,
+                    selected: amountText
+                ) { chosen in
+                    amountText = chosen
+                }
+
+                labeledField("Pumping time (optional)") {
+                    VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                        BLAmountField(
+                            text: $pumpDurationText,
+                            unit: "min",
+                            size: .md,
+                            placeholder: "0"
+                        )
+
+                        presetChipsRow(
+                            presets: Self.pumpMinutePresets,
+                            selected: pumpDurationText
+                        ) { chosen in
+                            pumpDurationText = (pumpDurationText == chosen ? "" : chosen)
+                        }
+                    }
+                }
+
+                labeledField("Side") {
+                    BLSegmentedControl(
+                        options: [BreastSide.left, .right, .both],
+                        selection: $pumpSide,
+                        size: .lg,
+                        isBlock: true
+                    ) { sideShortLabel($0) }
+                }
             }
         }
     }
@@ -740,7 +913,41 @@ public struct LogSheetView: View {
                 ) { $0.rawValue }
             }
 
+            if poopSelection != .none {
+                labeledField("Poop color (optional)") {
+                    BLFlowLayout(horizontalSpacing: BLSpacing.space2, verticalSpacing: BLSpacing.space2) {
+                        ForEach(PoopColor.allCases, id: \.self) { color in
+                            PoopColorChip(
+                                color: color,
+                                isSelected: poopColor == color
+                            ) {
+                                poopColor = (poopColor == color ? nil : color)
+                            }
+                        }
+                    }
+                }
+
+                labeledField("Consistency (optional)") {
+                    BLFlowLayout(horizontalSpacing: BLSpacing.space2, verticalSpacing: BLSpacing.space2) {
+                        ForEach(PoopConsistency.allCases, id: \.self) { item in
+                            BLChip(
+                                FormattingHelpers.formatPoopConsistency(item),
+                                isSelected: poopConsistency == item
+                            ) {
+                                poopConsistency = (poopConsistency == item ? nil : item)
+                            }
+                        }
+                    }
+                }
+            }
+
             BLCheckbox(isChecked: $diaperRash, label: "Rash")
+        }
+        .onChange(of: poopSelection) { _, newValue in
+            if newValue == .none {
+                poopColor = nil
+                poopConsistency = nil
+            }
         }
     }
 
@@ -1013,26 +1220,40 @@ public struct LogSheetView: View {
                 store.logManualNursing(
                     startedAt: timestamp,
                     minutes: mins,
-                    side: nursingSide
+                    side: nursingSide,
+                    lastSide: nursingSide == .both ? nursingLastSide : nursingSide
                 )
             }
 
         case .pump:
-            let amount = max(0, Double(amountText) ?? 0)
-            guard amount > 0 else { return }
-            store.logPump(
-                startedAt: timestamp,
-                amount: amount,
-                unit: volumeUnit,
-                side: pumpSide
-            )
+            let parsedAmount = max(0, Double(amountText) ?? 0)
+            if isPumpTimerMode {
+                guard store.activePump != nil else { return }
+                store.finishPumpTimer(
+                    amount: parsedAmount > 0 ? parsedAmount : nil,
+                    unit: volumeUnit,
+                    side: store.activePump?.side ?? pumpSide
+                )
+            } else {
+                let parsedDuration = max(0, Double(pumpDurationText) ?? 0)
+                guard parsedAmount > 0 || parsedDuration > 0 else { return }
+                store.logPump(
+                    startedAt: timestamp,
+                    amount: parsedAmount,
+                    unit: volumeUnit,
+                    side: pumpSide,
+                    durationMinutes: parsedDuration > 0 ? parsedDuration : nil
+                )
+            }
 
         case .diaper:
             store.logDiaper(
                 startedAt: timestamp,
                 pee: peeSelection.diaperSize,
                 poop: poopSelection.diaperSize,
-                rash: diaperRash
+                rash: diaperRash,
+                poopColor: poopSelection == .none ? nil : poopColor,
+                poopConsistency: poopSelection == .none ? nil : poopConsistency
             )
 
         case .meal:
@@ -1114,19 +1335,26 @@ public struct LogSheetView: View {
                     amountMl: nil,
                     displayUnit: store.preferredUnit,
                     side: nursingSide,
-                    durationMinutes: mins
+                    durationMinutes: mins,
+                    lastSide: nursingSide == .both ? nursingLastSide : nursingSide
                 )
             )
 
         case .pump:
-            let amount = max(0, Double(amountText) ?? 0)
-            let amountMl = volumeUnit == .oz ? UnitConversion.ozToMl(amount) : amount
+            let parsedAmount = max(0, Double(amountText) ?? 0)
+            let parsedDuration = max(0, Double(pumpDurationText) ?? 0)
+            guard parsedAmount > 0 || parsedDuration > 0 else { return }
+            let amountMl: Double? = parsedAmount > 0
+                ? (volumeUnit == .oz ? UnitConversion.ozToMl(parsedAmount) : parsedAmount)
+                : nil
             updated.startedAt = timestamp
+            updated.endedAt = parsedDuration > 0 ? timestamp.addingTimeInterval(parsedDuration * 60.0) : nil
             updated.metadata = .pump(
                 PumpMetadata(
                     amountMl: amountMl,
                     displayUnit: volumeUnit,
-                    side: pumpSide
+                    side: pumpSide,
+                    durationMinutes: parsedDuration > 0 ? parsedDuration : nil
                 )
             )
 
@@ -1136,7 +1364,9 @@ public struct LogSheetView: View {
                 DiaperMetadata(
                     peeSize: peeSelection.diaperSize,
                     poopSize: poopSelection.diaperSize,
-                    rash: diaperRash
+                    rash: diaperRash,
+                    poopColor: poopSelection == .none ? nil : poopColor,
+                    poopConsistency: poopSelection == .none ? nil : poopConsistency
                 )
             )
 
@@ -1278,5 +1508,226 @@ private struct LiveNursingCommitButton: View {
             action: action
         )
         .disabled(!canCommit)
+    }
+}
+
+// MARK: - Clock-Isolated Live Pump Subviews
+
+@MainActor
+private struct LivePumpTimerSection: View {
+    @Environment(\.blTheme) private var theme
+    let store: BlythesLifeStore
+    @Binding var idleSide: BreastSide
+    var onStartTimer: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: BLSpacing.space4) {
+            if let session = store.activePump {
+                let elapsed = session.elapsedSeconds(asOf: store.now)
+                let activeSideBinding = Binding<BreastSide>(
+                    get: { session.side },
+                    set: { newSide in
+                        idleSide = newSide
+                        store.setActivePumpSide(newSide)
+                    }
+                )
+
+                HStack {
+                    Text("Started \(FormattingHelpers.formatClock(session.startedAt, timeZone: store.profileTimeZone))")
+                        .blMicroLabel()
+                    Spacer()
+                    BLBadge(session.isRunning ? "Running" : "Paused", tone: .event(.pump))
+                }
+                .frame(minHeight: 36)
+
+                Text(FormattingHelpers.formatMMSS(seconds: Int(elapsed)))
+                    .blTextRole(.timer)
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                BLButton(
+                    session.isRunning ? "Pause" : "Resume",
+                    variant: .secondary,
+                    size: .md,
+                    isBlock: true,
+                    icon: session.isRunning ? BLSymbol.pause : BLSymbol.play
+                ) {
+                    store.startOrTogglePumpTimer(side: session.side)
+                }
+
+                VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                    Text("Side")
+                        .blMicroLabel()
+                    BLSegmentedControl(
+                        options: [BreastSide.left, .right, .both],
+                        selection: activeSideBinding,
+                        size: .md,
+                        isBlock: true
+                    ) { side in
+                        sideLabel(side)
+                    }
+                }
+
+                Text("Runs while you close this.")
+                    .blTextRole(.callout)
+                    .foregroundStyle(theme.textSecondary)
+            } else {
+                Text("0:00")
+                    .blTextRole(.timer)
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                    Text("Side")
+                        .blMicroLabel()
+                    BLSegmentedControl(
+                        options: [BreastSide.left, .right, .both],
+                        selection: $idleSide,
+                        size: .md,
+                        isBlock: true
+                    ) { side in
+                        sideLabel(side)
+                    }
+                }
+
+                BLButton(
+                    "Start pump timer",
+                    variant: .primary,
+                    size: .md,
+                    isBlock: true,
+                    icon: BLSymbol.play
+                ) {
+                    onStartTimer?()
+                    store.startOrTogglePumpTimer(side: idleSide)
+                }
+            }
+        }
+    }
+
+    private func sideLabel(_ side: BreastSide) -> String {
+        switch side {
+        case .left: "Left"
+        case .right: "Right"
+        case .both: "Both"
+        }
+    }
+}
+
+@MainActor
+private struct LivePumpCommitButton: View {
+    let store: BlythesLifeStore
+    let amountText: String
+    let volumeUnit: VolumeUnit
+    let canCommit: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let title: String = {
+            guard let session = store.activePump else {
+                return "Start timer to log"
+            }
+            let elapsed = session.elapsedSeconds(asOf: store.now)
+            let mins = max(1, Int((elapsed / 60.0).rounded()))
+            let parsedAmount = max(0, Double(amountText) ?? 0)
+            if parsedAmount > 0 {
+                let amountLabel = FormattingHelpers.formatAmount(parsedAmount, unit: volumeUnit)
+                return "Log \(amountLabel) · \(mins)m pumped"
+            }
+            return "Log \(mins)m pumped"
+        }()
+
+        BLButton(
+            title,
+            variant: .primary,
+            size: .lg,
+            isBlock: true,
+            action: action
+        )
+        .disabled(!canCommit)
+    }
+}
+
+// MARK: - Diaper Poop Color Swatch Chip
+
+@MainActor
+private struct PoopColorChip: View {
+    @Environment(\.blTheme) private var theme
+
+    let color: PoopColor
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(Self.swatchColor(for: color))
+                    .overlay(
+                        Circle()
+                            .strokeBorder(theme.borderStrong, lineWidth: BLSpacing.borderWidth)
+                    )
+                    .frame(width: 12, height: 12)
+
+                Text(FormattingHelpers.formatPoopColor(color))
+                    .font(BLFont.ui(size: 14, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+            }
+        }
+        .buttonStyle(PoopColorChipStyle(isSelected: isSelected))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private static func swatchColor(for color: PoopColor) -> Color {
+        switch color {
+        case .yellow: BLColorPrimitives.oklch(0.76, 0.14, 90)
+        case .brown: BLColorPrimitives.oklch(0.48, 0.08, 55)
+        case .green: BLColorPrimitives.oklch(0.56, 0.10, 138)
+        case .orange: BLColorPrimitives.oklch(0.68, 0.14, 52)
+        case .black: BLColorPrimitives.oklch(0.24, 0.01, 70)
+        case .red: BLColorPrimitives.oklch(0.55, 0.16, 25)
+        case .pale: BLColorPrimitives.oklch(0.90, 0.015, 85)
+        }
+    }
+}
+
+private struct PoopColorChipStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        StyledBody(configuration: configuration, isSelected: isSelected)
+    }
+
+    private struct StyledBody: View {
+        @Environment(\.blTheme) private var theme
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        let configuration: Configuration
+        let isSelected: Bool
+
+        private var backgroundColor: Color {
+            if isSelected { return theme.diaper.tint }
+            return configuration.isPressed ? theme.bgSunken : theme.bgSurface
+        }
+
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: BLRadius.sm, style: .continuous)
+            configuration.label
+                .padding(.horizontal, 10)
+                .frame(minHeight: 38)
+                .foregroundStyle(isSelected ? theme.diaper.ink : theme.textPrimary)
+                .background(shape.fill(backgroundColor))
+                .overlay(
+                    shape.strokeBorder(
+                        isSelected ? theme.diaper.solid : theme.borderStrong,
+                        lineWidth: isSelected ? 2 : BLSpacing.borderWidth
+                    )
+                )
+                .contentShape(shape)
+                .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
+                .animation(
+                    BLMotion.easeOut(duration: BLMotion.fast, reducedMotion: reduceMotion),
+                    value: configuration.isPressed
+                )
+        }
     }
 }

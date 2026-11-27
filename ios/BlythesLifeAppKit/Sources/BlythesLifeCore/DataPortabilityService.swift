@@ -126,10 +126,6 @@ public enum DataPortabilityService: Sendable {
     }
 
     private static func csvDurationText(for event: EventDTO) -> String {
-        if let endedAt = event.endedAt, endedAt > event.startedAt {
-            let minutes = endedAt.timeIntervalSince(event.startedAt) / 60.0
-            return FormattingHelpers.formatDuration(minutes: minutes)
-        }
         switch event.metadata {
         case .feeding(let meta) where meta.method == .breast:
             if let minutes = meta.durationMinutes, minutes > 0 {
@@ -137,15 +133,27 @@ public enum DataPortabilityService: Sendable {
             }
             let totalSeconds = (meta.leftDurationSeconds ?? 0) + (meta.rightDurationSeconds ?? 0)
             if totalSeconds > 0 {
-                return FormattingHelpers.formatDuration(minutes: Double(totalSeconds) / 60.0)
+                return FormattingHelpers.formatDuration(minutes: max(1.0, Double(totalSeconds) / 60.0))
+            }
+            if let endedAt = event.endedAt, endedAt > event.startedAt {
+                let minutes = endedAt.timeIntervalSince(event.startedAt) / 60.0
+                return FormattingHelpers.formatDuration(minutes: minutes)
             }
             return ""
         case .pump(let meta):
             if let minutes = meta.durationMinutes, minutes > 0 {
                 return FormattingHelpers.formatDuration(minutes: minutes)
             }
+            if let endedAt = event.endedAt, endedAt > event.startedAt {
+                let minutes = endedAt.timeIntervalSince(event.startedAt) / 60.0
+                return FormattingHelpers.formatDuration(minutes: minutes)
+            }
             return ""
         default:
+            if let endedAt = event.endedAt, endedAt > event.startedAt {
+                let minutes = endedAt.timeIntervalSince(event.startedAt) / 60.0
+                return FormattingHelpers.formatDuration(minutes: minutes)
+            }
             return ""
         }
     }

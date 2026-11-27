@@ -96,19 +96,41 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
     public var rightAccumulatedSeconds: TimeInterval
     public var activeSide: BreastSide?
     public var activeSegmentStartedAt: Date?
+    public var lastActiveSide: BreastSide?
 
     public init(
         startedAt: Date,
         leftAccumulatedSeconds: TimeInterval = 0,
         rightAccumulatedSeconds: TimeInterval = 0,
         activeSide: BreastSide? = nil,
-        activeSegmentStartedAt: Date? = nil
+        activeSegmentStartedAt: Date? = nil,
+        lastActiveSide: BreastSide? = nil
     ) {
         self.startedAt = startedAt
         self.leftAccumulatedSeconds = leftAccumulatedSeconds
         self.rightAccumulatedSeconds = rightAccumulatedSeconds
         self.activeSide = activeSide
         self.activeSegmentStartedAt = activeSegmentStartedAt
+        self.lastActiveSide = lastActiveSide
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case startedAt
+        case leftAccumulatedSeconds
+        case rightAccumulatedSeconds
+        case activeSide
+        case activeSegmentStartedAt
+        case lastActiveSide
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.startedAt = try container.decode(Date.self, forKey: .startedAt)
+        self.leftAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .leftAccumulatedSeconds) ?? 0
+        self.rightAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .rightAccumulatedSeconds) ?? 0
+        self.activeSide = try container.decodeIfPresent(BreastSide.self, forKey: .activeSide)
+        self.activeSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .activeSegmentStartedAt)
+        self.lastActiveSide = try container.decodeIfPresent(BreastSide.self, forKey: .lastActiveSide)
     }
 
     public var isRunning: Bool {
@@ -129,6 +151,51 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
     }
 }
 
+/// Active pumping timer persisted across app launches.
+public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
+    public var startedAt: Date
+    public var accumulatedSeconds: Double
+    public var isRunning: Bool
+    public var activeSegmentStartedAt: Date?
+    public var side: BreastSide
+
+    public init(
+        startedAt: Date,
+        accumulatedSeconds: Double = 0,
+        isRunning: Bool = true,
+        activeSegmentStartedAt: Date? = nil,
+        side: BreastSide = .both
+    ) {
+        self.startedAt = startedAt
+        self.accumulatedSeconds = accumulatedSeconds
+        self.isRunning = isRunning
+        self.activeSegmentStartedAt = activeSegmentStartedAt
+        self.side = side
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case startedAt
+        case accumulatedSeconds
+        case isRunning
+        case activeSegmentStartedAt
+        case side
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.startedAt = try container.decode(Date.self, forKey: .startedAt)
+        self.accumulatedSeconds = try container.decodeIfPresent(Double.self, forKey: .accumulatedSeconds) ?? 0
+        self.isRunning = try container.decodeIfPresent(Bool.self, forKey: .isRunning) ?? false
+        self.activeSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .activeSegmentStartedAt)
+        self.side = try container.decodeIfPresent(BreastSide.self, forKey: .side) ?? .both
+    }
+
+    /// Computes live elapsed seconds as of `now`.
+    public func elapsedSeconds(asOf now: Date) -> Double {
+        accumulatedSeconds + (isRunning ? max(0, now.timeIntervalSince(activeSegmentStartedAt ?? startedAt)) : 0)
+    }
+}
+
 /// Complete offline-first state persisted atomically on disk (App Group or Application Support).
 public struct PersistedAppState: Codable, Sendable, Equatable {
     public var profile: ProfileDTO
@@ -137,6 +204,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
     public var events: [EventDTO]
     public var activeNapStart: Date?
     public var activeNursingSession: ActiveNursingSession?
+    public var activePumpSession: ActivePumpSession?
     public var pendingScans: [ScannedSheetRecord]
     public var outbox: [SyncOutboxItem]
     public var serverWatermark: Date?
@@ -156,6 +224,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         events: [EventDTO],
         activeNapStart: Date? = nil,
         activeNursingSession: ActiveNursingSession? = nil,
+        activePumpSession: ActivePumpSession? = nil,
         pendingScans: [ScannedSheetRecord] = [],
         outbox: [SyncOutboxItem] = [],
         serverWatermark: Date? = nil,
@@ -174,6 +243,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         self.events = events
         self.activeNapStart = activeNapStart
         self.activeNursingSession = activeNursingSession
+        self.activePumpSession = activePumpSession
         self.pendingScans = pendingScans
         self.outbox = outbox
         self.serverWatermark = serverWatermark
@@ -194,6 +264,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         case events
         case activeNapStart
         case activeNursingSession
+        case activePumpSession
         case pendingScans
         case outbox
         case serverWatermark
@@ -215,6 +286,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         self.events = try container.decodeIfPresent([EventDTO].self, forKey: .events) ?? []
         self.activeNapStart = try container.decodeIfPresent(Date.self, forKey: .activeNapStart)
         self.activeNursingSession = try container.decodeIfPresent(ActiveNursingSession.self, forKey: .activeNursingSession)
+        self.activePumpSession = try container.decodeIfPresent(ActivePumpSession.self, forKey: .activePumpSession)
         self.pendingScans = try container.decodeIfPresent([ScannedSheetRecord].self, forKey: .pendingScans) ?? []
         self.outbox = try container.decodeIfPresent([SyncOutboxItem].self, forKey: .outbox) ?? []
         self.serverWatermark = try container.decodeIfPresent(Date.self, forKey: .serverWatermark)

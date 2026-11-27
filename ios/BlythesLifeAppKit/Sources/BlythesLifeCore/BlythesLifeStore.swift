@@ -110,6 +110,16 @@ public struct GlanceSummary: Sendable, Equatable {
     }
 }
 
+public struct LastNursingSideInfo: Sendable, Equatable {
+    public var side: BreastSide
+    public var at: Date
+
+    public init(side: BreastSide, at: Date) {
+        self.side = side
+        self.at = at
+    }
+}
+
 public struct RhythmSweetSpotViewModel: Sendable, Equatable {
     public var title: String
     public var primaryValue: String
@@ -293,6 +303,7 @@ public final class BlythesLifeStore {
     public var events: [EventDTO]
     public var activeNapStart: Date?
     public var activeNursing: ActiveNursingSession?
+    public var activePump: ActivePumpSession?
     public var scannedSheets: [ScannedSheetRecord]
     public var preferredUnit: VolumeUnit
     public var colorModePreference: AppColorModePreference
@@ -471,6 +482,7 @@ public final class BlythesLifeStore {
         self.events = loadedState.events
         self.activeNapStart = loadedState.activeNapStart
         self.activeNursing = loadedState.activeNursingSession
+        self.activePump = loadedState.activePumpSession
         self.scannedSheets = loadedState.pendingScans
         self.outbox = loadedState.outbox
         self.serverWatermark = loadedState.serverWatermark
@@ -933,6 +945,38 @@ public final class BlythesLifeStore {
             isNursing: isNursing,
             event: feed
         )
+    }
+
+    /// Most recent nursing session's ending side (`.left` or `.right`) across all history so overnight feeds remember yesterday's last side.
+    public var lastNursingSideInfo: LastNursingSideInfo? {
+        let latestNursing = activeEvents
+            .filter { event in
+                guard event.eventType == .feeding,
+                      case .feeding(let meta) = event.metadata,
+                      meta.method == .breast
+                else {
+                    return false
+                }
+                return true
+            }
+            .sorted { lhs, rhs in
+                let lt = lhs.endedAt ?? lhs.startedAt
+                let rt = rhs.endedAt ?? rhs.startedAt
+                if lt != rt { return lt > rt }
+                return lhs.createdAt > rhs.createdAt
+            }
+            .first
+
+        guard let latestNursing, case .feeding(let meta) = latestNursing.metadata else {
+            return nil
+        }
+
+        let explicitLast: BreastSide? = (meta.lastSide == .left || meta.lastSide == .right) ? meta.lastSide : nil
+        let fallbackSide: BreastSide? = (meta.side == .left || meta.side == .right) ? meta.side : nil
+        guard let resolvedSide = explicitLast ?? fallbackSide else {
+            return nil
+        }
+        return LastNursingSideInfo(side: resolvedSide, at: latestNursing.endedAt ?? latestNursing.startedAt)
     }
 
     public var feedSweetSpot: RhythmSweetSpotViewModel {
@@ -1582,7 +1626,8 @@ public final class BlythesLifeStore {
                 leftAccumulatedSeconds: 0,
                 rightAccumulatedSeconds: 0,
                 activeSide: targetSide,
-                activeSegmentStartedAt: now
+                activeSegmentStartedAt: now,
+                lastActiveSide: targetSide
             )
             persistState()
             return
@@ -1595,7 +1640,8 @@ public final class BlythesLifeStore {
                 leftAccumulatedSeconds: elapsed.left,
                 rightAccumulatedSeconds: elapsed.right,
                 activeSide: nil,
-                activeSegmentStartedAt: nil
+                activeSegmentStartedAt: nil,
+                lastActiveSide: session.lastActiveSide ?? targetSide
             )
         } else {
             activeNursing = ActiveNursingSession(
@@ -1603,7 +1649,8 @@ public final class BlythesLifeStore {
                 leftAccumulatedSeconds: elapsed.left,
                 rightAccumulatedSeconds: elapsed.right,
                 activeSide: targetSide,
-                activeSegmentStartedAt: now
+                activeSegmentStartedAt: now,
+                lastActiveSide: targetSide
             )
         }
         persistState()
@@ -1613,16 +1660,25 @@ public final class BlythesLifeStore {
     public func finishNursing() -> EventDTO? {
         guard let session = activeNursing else { return nil }
         let elapsed = session.elapsedSeconds(asOf: now)
+
+        let both = elapsed.left > 0 && elapsed.right > 0
+        let side: BreastSide = both
+            ? .both
+            : (elapsed.left > 0
+                ? .left
+                : (elapsed.right > 0 ? .right : (session.lastActiveSide ?? session.activeSide ?? .left)))
+        let rawLastSide = session.lastActiveSide ?? session.activeSide ?? (side == .both ? nil : side)
+        let resolvedLastSide: BreastSide? = (rawLastSide == .left || rawLastSide == .right) ? rawLastSide : nil
+
         let pausedBackup = ActiveNursingSession(
             startedAt: session.startedAt,
             leftAccumulatedSeconds: elapsed.left,
             rightAccumulatedSeconds: elapsed.right,
             activeSide: nil,
-            activeSegmentStartedAt: nil
+            activeSegmentStartedAt: nil,
+            lastActiveSide: resolvedLastSide
         )
 
-        let both = elapsed.left > 0 && elapsed.right > 0
-        let side: BreastSide = both ? .both : (elapsed.left > 0 ? .left : .right)
         let leftMinutes = max(1, Int((elapsed.left / 60.0).rounded()))
         let rightMinutes = max(1, Int((elapsed.right / 60.0).rounded()))
         let totalMinutes = both ? (leftMinutes + rightMinutes) : max(1, Int((elapsed.total / 60.0).rounded()))
@@ -1640,7 +1696,8 @@ public final class BlythesLifeStore {
                     side: side,
                     durationMinutes: Double(totalMinutes),
                     leftDurationSeconds: Int(elapsed.left.rounded()),
-                    rightDurationSeconds: Int(elapsed.right.rounded())
+                    rightDurationSeconds: Int(elapsed.right.rounded()),
+                    lastSide: resolvedLastSide
                 )
             )
         )
@@ -1664,7 +1721,8 @@ public final class BlythesLifeStore {
             leftAccumulatedSeconds: elapsed.left,
             rightAccumulatedSeconds: elapsed.right,
             activeSide: nil,
-            activeSegmentStartedAt: nil
+            activeSegmentStartedAt: nil,
+            lastActiveSide: session.lastActiveSide ?? session.activeSide
         )
         activeNursing = nil
         persistState()
@@ -1680,10 +1738,17 @@ public final class BlythesLifeStore {
         startedAt: Date,
         minutes: Double,
         side: BreastSide,
+        lastSide: BreastSide? = nil,
         notes: String? = nil
     ) -> EventDTO {
         let clampedMinutes = max(0, minutes)
         let endedAt = startedAt.addingTimeInterval(clampedMinutes * 60.0)
+        let resolvedLastSide: BreastSide? = {
+            if side == .both {
+                return (lastSide == .left || lastSide == .right) ? lastSide : nil
+            }
+            return side
+        }()
         let event = makeEvent(
             type: .feeding,
             startedAt: startedAt,
@@ -1696,13 +1761,131 @@ public final class BlythesLifeStore {
                     amountMl: nil,
                     displayUnit: preferredUnit,
                     side: side,
-                    durationMinutes: clampedMinutes
+                    durationMinutes: clampedMinutes,
+                    lastSide: resolvedLastSide
                 )
             )
         )
         let minText = FormattingHelpers.formatNumber(clampedMinutes, maxFractionDigits: 1)
         commitNewEvents([event], toastMessage: "Nursing logged · \(minText)m")
         return event
+    }
+
+    // MARK: - Pump Timer Actions
+
+    public func startOrTogglePumpTimer(side: BreastSide = .both) {
+        guard let session = activePump else {
+            activePump = ActivePumpSession(
+                startedAt: now,
+                accumulatedSeconds: 0,
+                isRunning: true,
+                activeSegmentStartedAt: now,
+                side: side
+            )
+            persistState()
+            return
+        }
+
+        if session.isRunning {
+            activePump = ActivePumpSession(
+                startedAt: session.startedAt,
+                accumulatedSeconds: session.elapsedSeconds(asOf: now),
+                isRunning: false,
+                activeSegmentStartedAt: nil,
+                side: session.side
+            )
+        } else {
+            activePump = ActivePumpSession(
+                startedAt: session.startedAt,
+                accumulatedSeconds: session.accumulatedSeconds,
+                isRunning: true,
+                activeSegmentStartedAt: now,
+                side: session.side
+            )
+        }
+        persistState()
+    }
+
+    public func setActivePumpSide(_ side: BreastSide) {
+        guard activePump != nil else { return }
+        activePump?.side = side
+        persistState()
+    }
+
+    @discardableResult
+    public func finishPumpTimer(
+        amount: Double? = nil,
+        unit: VolumeUnit? = nil,
+        side: BreastSide? = nil,
+        notes: String? = nil
+    ) -> EventDTO? {
+        guard let session = activePump else { return nil }
+        let elapsed = session.elapsedSeconds(asOf: now)
+        let pausedBackup = ActivePumpSession(
+            startedAt: session.startedAt,
+            accumulatedSeconds: elapsed,
+            isRunning: false,
+            activeSegmentStartedAt: nil,
+            side: session.side
+        )
+        let minutes = max(1, Int((elapsed / 60.0).rounded()))
+        let effectiveUnit = unit ?? preferredUnit
+        let effectiveSide = side ?? session.side
+        let positiveAmount: Double? = (amount ?? 0) > 0 ? amount : nil
+        let amountMl: Double? = positiveAmount.map {
+            effectiveUnit == .oz ? UnitConversion.ozToMl($0) : $0
+        }
+
+        let event = makeEvent(
+            type: .pump,
+            startedAt: session.startedAt,
+            endedAt: max(now, session.startedAt),
+            notes: trimmedNonEmpty(notes),
+            metadata: .pump(
+                PumpMetadata(
+                    amountMl: amountMl,
+                    displayUnit: effectiveUnit,
+                    side: effectiveSide,
+                    durationMinutes: Double(minutes)
+                )
+            )
+        )
+
+        activePump = nil
+        appendEvents([event])
+        let toastMessage: String
+        if let positiveAmount {
+            let amountLabel = FormattingHelpers.formatAmount(positiveAmount, unit: effectiveUnit)
+            toastMessage = "Pump logged · \(amountLabel) · \(minutes)m"
+        } else {
+            toastMessage = "Pump logged · \(minutes)m"
+        }
+        showToast(toastMessage) { [weak self] in
+            guard let self else { return }
+            self.removeNewlyCreatedEvents(ids: [event.id])
+            self.activePump = pausedBackup
+            self.persistState()
+        }
+        return event
+    }
+
+    public func discardPumpTimer() {
+        guard let session = activePump else { return }
+        let elapsed = session.elapsedSeconds(asOf: now)
+        let pausedBackup = ActivePumpSession(
+            startedAt: session.startedAt,
+            accumulatedSeconds: elapsed,
+            isRunning: false,
+            activeSegmentStartedAt: nil,
+            side: session.side
+        )
+        activePump = nil
+        persistState()
+        showToast("Pump timer discarded") { [weak self] in
+            guard let self else { return }
+            self.activePump = pausedBackup
+            self.persistState()
+        }
     }
 
     // MARK: - Daily Care Logging Actions
@@ -1762,22 +1945,41 @@ public final class BlythesLifeStore {
         durationMinutes: Double? = nil,
         notes: String? = nil
     ) -> EventDTO {
-        let amountMl = unit == .oz ? UnitConversion.ozToMl(amount) : amount
+        let effectiveDuration: Double? = (durationMinutes ?? 0) > 0 ? durationMinutes : nil
+        let amountMl: Double?
+        if amount > 0 {
+            amountMl = unit == .oz ? UnitConversion.ozToMl(amount) : amount
+        } else if effectiveDuration != nil {
+            amountMl = nil
+        } else {
+            amountMl = 0
+        }
+        let endedAt = effectiveDuration.map { startedAt.addingTimeInterval($0 * 60.0) }
         let event = makeEvent(
             type: .pump,
             startedAt: startedAt,
+            endedAt: endedAt,
             notes: trimmedNonEmpty(notes),
             metadata: .pump(
                 PumpMetadata(
                     amountMl: amountMl,
                     displayUnit: unit,
                     side: side,
-                    durationMinutes: durationMinutes
+                    durationMinutes: effectiveDuration
                 )
             )
         )
-        let amountLabel = FormattingHelpers.formatAmount(amount, unit: unit)
-        commitNewEvents([event], toastMessage: "Pump logged · \(amountLabel)")
+        let toastMessage: String
+        if amount > 0, let mins = effectiveDuration {
+            let amountLabel = FormattingHelpers.formatAmount(amount, unit: unit)
+            toastMessage = "Pump logged · \(amountLabel) · \(max(1, Int(mins.rounded())))m"
+        } else if let mins = effectiveDuration {
+            toastMessage = "Pump logged · \(max(1, Int(mins.rounded())))m"
+        } else {
+            let amountLabel = FormattingHelpers.formatAmount(amount, unit: unit)
+            toastMessage = "Pump logged · \(amountLabel)"
+        }
+        commitNewEvents([event], toastMessage: toastMessage)
         return event
     }
 
@@ -1787,13 +1989,25 @@ public final class BlythesLifeStore {
         pee: DiaperSize?,
         poop: DiaperSize?,
         rash: Bool = false,
-        notes: String? = nil
+        notes: String? = nil,
+        poopColor: PoopColor? = nil,
+        poopConsistency: PoopConsistency? = nil
     ) -> EventDTO {
+        let effectivePoopColor = poop == nil ? nil : poopColor
+        let effectivePoopConsistency = poop == nil ? nil : poopConsistency
         let event = makeEvent(
             type: .diaper,
             startedAt: startedAt,
             notes: trimmedNonEmpty(notes),
-            metadata: .diaper(DiaperMetadata(peeSize: pee, poopSize: poop, rash: rash))
+            metadata: .diaper(
+                DiaperMetadata(
+                    peeSize: pee,
+                    poopSize: poop,
+                    rash: rash,
+                    poopColor: effectivePoopColor,
+                    poopConsistency: effectivePoopConsistency
+                )
+            )
         )
         let detail = eventDetail(for: event)
         commitNewEvents([event], toastMessage: "Diaper logged · \(detail)")
@@ -2366,6 +2580,7 @@ public final class BlythesLifeStore {
                 scannedSheets = []
                 activeNapStart = nil
                 activeNursing = nil
+                activePump = nil
                 outbox = []
                 serverWatermark = nil
                 pendingJoinRequest = nil
@@ -2386,6 +2601,7 @@ public final class BlythesLifeStore {
                 scannedSheets = []
                 activeNapStart = nil
                 activeNursing = nil
+                activePump = nil
                 outbox = []
                 serverWatermark = nil
                 hasCompletedHouseholdSetup = false
@@ -2448,6 +2664,7 @@ public final class BlythesLifeStore {
             scannedSheets = []
             activeNapStart = nil
             activeNursing = nil
+            activePump = nil
             outbox = []
             serverWatermark = nil
             pendingJoinRequest = nil
@@ -2576,6 +2793,7 @@ public final class BlythesLifeStore {
                 scannedSheets = []
                 activeNapStart = nil
                 activeNursing = nil
+                activePump = nil
                 outbox = []
                 serverWatermark = nil
                 pendingJoinRequest = nil
@@ -2619,6 +2837,7 @@ public final class BlythesLifeStore {
 
             guard !me.households.isEmpty else {
                 stopRealtimeSync()
+                activePump = nil
                 hasCompletedHouseholdSetup = false
                 if let pending = me.pendingJoinRequests?.first(where: { $0.status == .pending }) {
                     pendingJoinRequest = pending
@@ -2640,6 +2859,7 @@ public final class BlythesLifeStore {
                 household = matchingHousehold
             } else if let chosenHousehold = Self.selectPreferredHousehold(from: me.households, profiles: profiles) {
                 household = chosenHousehold
+                activePump = nil
             }
 
             if let sameProfile = profiles.first(where: {
@@ -2656,6 +2876,7 @@ public final class BlythesLifeStore {
                     scannedSheets = []
                     activeNapStart = nil
                     activeNursing = nil
+                    activePump = nil
                     serverWatermark = nil
                 }
             } else {
@@ -2674,6 +2895,7 @@ public final class BlythesLifeStore {
                 if wasDemoProfile {
                     events = []
                     scannedSheets = []
+                    activePump = nil
                     serverWatermark = nil
                 }
             }
@@ -3039,10 +3261,12 @@ public final class BlythesLifeStore {
                 persistState()
             } else if let first = households.first, sessionStage == .ready {
                 household = first
+                activePump = nil
                 lastSyncError = nil
                 persistState()
             } else if households.isEmpty && sessionStage == .ready {
                 stopRealtimeSync()
+                activePump = nil
                 pendingJoinRequest = nil
                 hasCompletedHouseholdSetup = false
                 sessionStage = .needsHouseholdSetup
@@ -3083,6 +3307,7 @@ public final class BlythesLifeStore {
         scannedSheets = []
         activeNapStart = nil
         activeNursing = nil
+        activePump = nil
         outbox = []
         serverWatermark = nil
         pendingJoinRequest = nil
@@ -3157,6 +3382,7 @@ public final class BlythesLifeStore {
         events = demo.events
         activeNapStart = nil
         activeNursing = nil
+        activePump = nil
         scannedSheets = demo.pendingScans
         outbox = []
         serverWatermark = nil
@@ -3184,6 +3410,7 @@ public final class BlythesLifeStore {
         events = []
         activeNapStart = nil
         activeNursing = nil
+        activePump = nil
         scannedSheets = []
         outbox = []
         serverWatermark = nil
@@ -3257,6 +3484,7 @@ public final class BlythesLifeStore {
         events = []
         activeNapStart = nil
         activeNursing = nil
+        activePump = nil
         scannedSheets = []
         outbox = []
         serverWatermark = nil
@@ -3307,6 +3535,7 @@ public final class BlythesLifeStore {
         scannedSheets = []
         activeNapStart = nil
         activeNursing = nil
+        activePump = nil
         outbox = []
         serverWatermark = nil
         syncStatus = .localOnly
@@ -3384,6 +3613,7 @@ public final class BlythesLifeStore {
         events = []
         activeNapStart = nil
         activeNursing = nil
+        activePump = nil
         scannedSheets = []
         outbox = []
         serverWatermark = nil
@@ -3727,6 +3957,7 @@ public final class BlythesLifeStore {
         try? tokenStore.clear()
         accessToken = nil
         refreshToken = nil
+        activePump = nil
         pendingJoinRequest = nil
         isSignedInWithApple = false
         isDemoPreview = false
@@ -3877,6 +4108,7 @@ public final class BlythesLifeStore {
             events: events,
             activeNapStart: activeNapStart,
             activeNursingSession: activeNursing,
+            activePumpSession: activePump,
             pendingScans: scannedSheets,
             outbox: outbox,
             serverWatermark: serverWatermark,

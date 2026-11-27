@@ -59,6 +59,26 @@ public enum DiaperSize: String, Codable, Sendable, CaseIterable, Hashable {
     public var shortLabel: String { rawValue }
 }
 
+public enum PoopColor: String, Codable, Sendable, CaseIterable, Hashable {
+    case yellow
+    case brown
+    case green
+    case orange
+    case black
+    case red
+    case pale
+}
+
+public enum PoopConsistency: String, Codable, Sendable, CaseIterable, Hashable {
+    case watery
+    case runny
+    case seedy
+    case soft
+    case firm
+    case hard
+    case mucousy
+}
+
 public enum MealSlot: String, Codable, Sendable, CaseIterable, Hashable {
     case breakfast
     case lunch
@@ -110,6 +130,7 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
     public var durationMinutes: Double?
     public var leftDurationSeconds: Int?
     public var rightDurationSeconds: Int?
+    public var lastSide: BreastSide?
 
     public init(
         method: FeedingMethod = .bottle,
@@ -119,7 +140,8 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         side: BreastSide? = nil,
         durationMinutes: Double? = nil,
         leftDurationSeconds: Int? = nil,
-        rightDurationSeconds: Int? = nil
+        rightDurationSeconds: Int? = nil,
+        lastSide: BreastSide? = nil
     ) {
         self.method = method
         self.substance = substance
@@ -129,6 +151,7 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         self.durationMinutes = durationMinutes
         self.leftDurationSeconds = leftDurationSeconds
         self.rightDurationSeconds = rightDurationSeconds
+        self.lastSide = lastSide
     }
 
     public init(
@@ -144,6 +167,7 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         self.durationMinutes = nil
         self.leftDurationSeconds = nil
         self.rightDurationSeconds = nil
+        self.lastSide = nil
     }
 
     public var amountOz: Double? {
@@ -159,6 +183,7 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         case durationMinutes = "duration_minutes"
         case leftDurationSeconds = "left_duration_seconds"
         case rightDurationSeconds = "right_duration_seconds"
+        case lastSide = "last_side"
     }
 
     public init(from decoder: Decoder) throws {
@@ -171,6 +196,7 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         self.durationMinutes = try container.decodeIfPresent(Double.self, forKey: .durationMinutes)
         self.leftDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .leftDurationSeconds)
         self.rightDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .rightDurationSeconds)
+        self.lastSide = try container.decodeIfPresent(BreastSide.self, forKey: .lastSide)
     }
 }
 
@@ -227,21 +253,29 @@ public struct DiaperMetadata: Codable, Sendable, Equatable, Hashable {
     public var peeSize: DiaperSize?
     public var poopSize: DiaperSize?
     public var rash: Bool
+    public var poopColor: PoopColor?
+    public var poopConsistency: PoopConsistency?
 
     public init(
         peeSize: DiaperSize? = nil,
         poopSize: DiaperSize? = nil,
-        rash: Bool = false
+        rash: Bool = false,
+        poopColor: PoopColor? = nil,
+        poopConsistency: PoopConsistency? = nil
     ) {
         self.peeSize = peeSize
         self.poopSize = poopSize
         self.rash = rash
+        self.poopColor = poopColor
+        self.poopConsistency = poopConsistency
     }
 
     enum CodingKeys: String, CodingKey {
         case peeSize = "pee_size"
         case poopSize = "poop_size"
         case rash
+        case poopColor = "poop_color"
+        case poopConsistency = "poop_consistency"
     }
 
     public init(from decoder: Decoder) throws {
@@ -249,6 +283,8 @@ public struct DiaperMetadata: Codable, Sendable, Equatable, Hashable {
         self.peeSize = try container.decodeIfPresent(DiaperSize.self, forKey: .peeSize)
         self.poopSize = try container.decodeIfPresent(DiaperSize.self, forKey: .poopSize)
         self.rash = try container.decodeIfPresent(Bool.self, forKey: .rash) ?? false
+        self.poopColor = try container.decodeIfPresent(PoopColor.self, forKey: .poopColor)
+        self.poopConsistency = try container.decodeIfPresent(PoopConsistency.self, forKey: .poopConsistency)
     }
 }
 
@@ -340,10 +376,13 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
         case method
         case substance
         case side
+        case lastSide = "last_side"
         case amountMl = "amount_ml"
         case displayUnit = "display_unit"
         case peeSize = "pee_size"
         case poopSize = "poop_size"
+        case poopColor = "poop_color"
+        case poopConsistency = "poop_consistency"
         case rash
         case mealSlot = "meal_slot"
         case portionEaten = "portion_eaten"
@@ -357,7 +396,7 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
 
         if container.contains(.sleepType) {
             self = .sleep(try SleepMetadata(from: decoder))
-        } else if container.contains(.method) || container.contains(.substance) {
+        } else if container.contains(.method) || container.contains(.substance) || container.contains(.lastSide) {
             self = .feeding(try FeedingMetadata(from: decoder))
         } else if container.contains(.side) {
             self = .pump(try PumpMetadata(from: decoder))
@@ -367,7 +406,7 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
             self = .bath(try BathMetadata(from: decoder))
         } else if container.contains(.name) || container.contains(.category) {
             self = .medicine(try MedicineMetadata(from: decoder))
-        } else if container.contains(.peeSize) || container.contains(.poopSize) || container.contains(.rash) {
+        } else if container.contains(.peeSize) || container.contains(.poopSize) || container.contains(.poopColor) || container.contains(.poopConsistency) || container.contains(.rash) {
             self = .diaper(try DiaperMetadata(from: decoder))
         } else if container.contains(.mealSlot) || container.contains(.portionEaten) {
             self = .meal(try MealMetadata(from: decoder))

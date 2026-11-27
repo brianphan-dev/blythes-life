@@ -722,6 +722,25 @@ struct FormattingHelpersTests {
             Issue.record("Expected meal metadata on dinner draft")
         }
     }
+
+    @Test("Poop color and consistency formatters cover all canonical cases")
+    func poopTraitFormatters() {
+        #expect(FormattingHelpers.formatPoopColor(.yellow) == "Yellow")
+        #expect(FormattingHelpers.formatPoopColor(.brown) == "Brown")
+        #expect(FormattingHelpers.formatPoopColor(.green) == "Green")
+        #expect(FormattingHelpers.formatPoopColor(.orange) == "Orange")
+        #expect(FormattingHelpers.formatPoopColor(.black) == "Black")
+        #expect(FormattingHelpers.formatPoopColor(.red) == "Red")
+        #expect(FormattingHelpers.formatPoopColor(.pale) == "Pale")
+
+        #expect(FormattingHelpers.formatPoopConsistency(.watery) == "Watery")
+        #expect(FormattingHelpers.formatPoopConsistency(.runny) == "Runny")
+        #expect(FormattingHelpers.formatPoopConsistency(.seedy) == "Seedy")
+        #expect(FormattingHelpers.formatPoopConsistency(.soft) == "Soft")
+        #expect(FormattingHelpers.formatPoopConsistency(.firm) == "Firm")
+        #expect(FormattingHelpers.formatPoopConsistency(.hard) == "Hard")
+        #expect(FormattingHelpers.formatPoopConsistency(.mucousy) == "Mucousy")
+    }
 }
 
 // MARK: - Duo Posture Resolver Tests
@@ -936,14 +955,16 @@ struct BlythesLifeStoreTests {
         if case .feeding(let meta) = saved?.metadata {
             #expect(meta.method == .breast)
             #expect(meta.side == .both)
+            #expect(meta.lastSide == .right)
             #expect(meta.durationMinutes == 5)
             #expect(meta.leftDurationSeconds == 120)
             #expect(meta.rightDurationSeconds == 180)
         } else {
             Issue.record("Expected breast feeding metadata")
         }
-        #expect(store.eventDetail(for: saved!) == "5m · Left 2m, Right 3m")
+        #expect(store.eventDetail(for: saved!) == "5m · Left 2m, Right 3m · Ended right")
         #expect(store.lastFeedGlance.isNursing == true)
+        #expect(store.lastNursingSideInfo?.side == .right)
     }
 
     @Test("Bottle with Vitamin D companion logs two events and undoes both together")
@@ -1705,6 +1726,391 @@ struct BlythesLifeStoreTests {
         #expect(afterNapLunch.sweetSpotSuffix == " · 10m ago")
         #expect(afterNapLunch.isOver == true)
         #expect(afterNapLunch.progress != nil)
+    }
+
+    @Test("Nursing last-side tracking persists across pause, finish, overnight day boundary, and manual entry")
+    func nursingLastSideTrackingAcrossDaysAndManualEntry() throws {
+        let store = BlythesLifeStore.makeDemo()
+        #expect(store.lastNursingSideInfo == nil)
+
+        // 1. Live timer: Left -> Right -> Pause -> Finish records lastSide == .right
+        let t0 = makeDate(day: 25, hour: 21, minute: 0)
+        store.tick(now: t0)
+        store.tapNursingSide(.left)
+        #expect(store.activeNursing?.lastActiveSide == .left)
+
+        store.tick(now: t0.addingTimeInterval(4 * 60))
+        store.tapNursingSide(.right)
+        #expect(store.activeNursing?.lastActiveSide == .right)
+
+        store.tick(now: t0.addingTimeInterval(10 * 60))
+        store.tapNursingSide(.right) // Pause
+        #expect(store.activeNursing?.activeSide == nil)
+        #expect(store.activeNursing?.lastActiveSide == .right)
+
+        let finished = try #require(store.finishNursing())
+        if case .feeding(let meta) = finished.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.lastSide == .right)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: finished) == "10m · Left 4m, Right 6m · Ended right")
+
+        // Advance to next morning (day 26, 6:30 AM): overnight feed still remembers yesterday's last side!
+        let nextMorning = makeDate(day: 26, hour: 6, minute: 30)
+        store.tick(now: nextMorning)
+        let overnightInfo = try #require(store.lastNursingSideInfo)
+        #expect(overnightInfo.side == .right)
+        #expect(overnightInfo.at == t0.addingTimeInterval(10 * 60))
+
+        // 2. Manual nursing with side: .both, lastSide: .left
+        let manualBothStart = makeDate(day: 26, hour: 7, minute: 0)
+        let manualBoth = store.logManualNursing(
+            startedAt: manualBothStart,
+            minutes: 15,
+            side: .both,
+            lastSide: .left
+        )
+        if case .feeding(let meta) = manualBoth.metadata {
+            #expect(meta.side == .both)
+            #expect(meta.lastSide == .left)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: manualBoth) == "15m · Both sides · Ended left")
+        let afterManualBoth = try #require(store.lastNursingSideInfo)
+        #expect(afterManualBoth.side == .left)
+        #expect(afterManualBoth.at == manualBothStart.addingTimeInterval(15 * 60))
+
+        // 3. Manual nursing with side: .left automatically records lastSide: .left without redundant "Ended left"
+        let manualLeftStart = makeDate(day: 26, hour: 10, minute: 0)
+        let manualLeft = store.logManualNursing(
+            startedAt: manualLeftStart,
+            minutes: 12,
+            side: .left
+        )
+        if case .feeding(let meta) = manualLeft.metadata {
+            #expect(meta.side == .left)
+            #expect(meta.lastSide == .left)
+        } else {
+            Issue.record("Expected breast feeding metadata")
+        }
+        #expect(store.eventDetail(for: manualLeft) == "12m · Left side")
+
+        // 4. Manual nursing with side: .both and lastSide: nil returns nil (does not fall back to stale prior feed)
+        let manualUnknown = store.logManualNursing(
+            startedAt: makeDate(day: 26, hour: 13, minute: 0),
+            minutes: 14,
+            side: .both,
+            lastSide: nil
+        )
+        #expect(store.eventDetail(for: manualUnknown) == "14m · Both sides")
+        #expect(store.lastNursingSideInfo == nil)
+
+        // Pediatrician CSV reflects ended side on both-sides nursing rows
+        let csv = store.exportPediatricianCSVString()
+        #expect(csv.contains("\"10m · Left 4m, Right 6m · Ended right\""))
+        #expect(csv.contains("15m · Both sides · Ended left,15m"))
+    }
+
+    @Test("Diaper logging stores optional poop color & consistency, strips them when poop is nil, and exports CSV cleanly")
+    func diaperPoopColorAndConsistency() throws {
+        let store = BlythesLifeStore.makeDemo()
+
+        // 1. Pee + Poop with color & consistency
+        let richPoop = store.logDiaper(
+            startedAt: store.now,
+            pee: .large,
+            poop: .medium,
+            rash: false,
+            notes: "After breakfast",
+            poopColor: .yellow,
+            poopConsistency: .seedy
+        )
+        if case .diaper(let meta) = richPoop.metadata {
+            #expect(meta.peeSize == .large)
+            #expect(meta.poopSize == .medium)
+            #expect(meta.poopColor == .yellow)
+            #expect(meta.poopConsistency == .seedy)
+            #expect(meta.rash == false)
+        } else {
+            Issue.record("Expected diaper metadata")
+        }
+        #expect(store.eventDetail(for: richPoop) == "Pee L · Poop M (Yellow, Seedy)")
+        #expect(store.toast?.message == "Diaper logged · Pee L · Poop M (Yellow, Seedy)")
+
+        // 2. Poop with color only + rash
+        let colorOnly = store.logDiaper(
+            startedAt: store.now.addingTimeInterval(60),
+            pee: nil,
+            poop: .small,
+            rash: true,
+            poopColor: .green
+        )
+        #expect(store.eventDetail(for: colorOnly) == "Poop S (Green) · Rash")
+
+        // 3. Pee-only diaper strips dangling poopColor & poopConsistency
+        let peeOnly = store.logDiaper(
+            startedAt: store.now.addingTimeInterval(120),
+            pee: .medium,
+            poop: nil,
+            rash: false,
+            poopColor: .brown,
+            poopConsistency: .soft
+        )
+        if case .diaper(let meta) = peeOnly.metadata {
+            #expect(meta.peeSize == .medium)
+            #expect(meta.poopSize == nil)
+            #expect(meta.poopColor == nil)
+            #expect(meta.poopConsistency == nil)
+        } else {
+            Issue.record("Expected diaper metadata")
+        }
+        #expect(store.eventDetail(for: peeOnly) == "Pee M")
+
+        // 4. Pediatrician CSV quotes Details containing comma cleanly
+        let csv = store.exportPediatricianCSVString()
+        #expect(csv.contains("\"Pee L · Poop M (Yellow, Seedy)\""))
+        #expect(csv.contains("Poop S (Green) · Rash"))
+    }
+
+    @Test("Pump timer start/pause/resume/finish (with & without volume), Undo, discard, and manual durationMinutes")
+    func pumpTimerAndManualDurationLifecycle() throws {
+        let storage = InMemoryLocalStateStorage(initialState: SampleSeedData.makeDemoState())
+        let store = BlythesLifeStore(
+            storage: storage,
+            apiClient: nil,
+            tokenStore: InMemoryAuthTokenStorage(),
+            initialNow: SampleSeedData.defaultReferenceDate
+        )
+        let t0 = store.now
+
+        // Start timer
+        store.startOrTogglePumpTimer(side: .both)
+        let started = try #require(store.activePump)
+        #expect(started.isRunning == true)
+        #expect(started.side == .both)
+        #expect(started.elapsedSeconds(asOf: t0) == 0)
+
+        // Advance 5m, pause
+        store.tick(now: t0.addingTimeInterval(5 * 60))
+        #expect(store.activePump?.elapsedSeconds(asOf: store.now) == 300)
+        store.startOrTogglePumpTimer()
+        #expect(store.activePump?.isRunning == false)
+        #expect(store.activePump?.accumulatedSeconds == 300)
+
+        // Change side while paused and verify persistence across reload
+        store.setActivePumpSide(.left)
+        #expect(store.activePump?.side == .left)
+        let persisted = try #require(try storage.load())
+        #expect(persisted.activePumpSession?.side == .left)
+        #expect(persisted.activePumpSession?.accumulatedSeconds == 300)
+
+        // Advance 10m while paused -> elapsed must NOT increase
+        store.tick(now: t0.addingTimeInterval(15 * 60))
+        #expect(store.activePump?.elapsedSeconds(asOf: store.now) == 300)
+
+        // Resume and pump another 10m -> total active time = 15m (wall clock span = 25m)
+        store.startOrTogglePumpTimer()
+        #expect(store.activePump?.isRunning == true)
+        store.tick(now: t0.addingTimeInterval(25 * 60))
+        #expect(store.activePump?.elapsedSeconds(asOf: store.now) == 900)
+
+        // Discard + Undo restores paused session with accumulated 900s
+        store.discardPumpTimer()
+        #expect(store.activePump == nil)
+        #expect(store.toast?.message == "Pump timer discarded")
+        store.undoLastToast()
+        let restoredAfterDiscard = try #require(store.activePump)
+        #expect(restoredAfterDiscard.isRunning == false)
+        #expect(restoredAfterDiscard.accumulatedSeconds == 900)
+        #expect(restoredAfterDiscard.side == .left)
+
+        // Finish WITH volume -> logs event + toast + Undo restores paused session
+        let beforeCount = store.activeEvents.count
+        let savedWithVolume = try #require(store.finishPumpTimer(amount: 4, unit: .oz, notes: "Morning pump"))
+        #expect(store.activePump == nil)
+        #expect(store.activeEvents.count == beforeCount + 1)
+        #expect(store.toast?.message == "Pump logged · 4 oz · 15m")
+        #expect(savedWithVolume.endedAt == t0.addingTimeInterval(25 * 60))
+        if case .pump(let meta) = savedWithVolume.metadata {
+            #expect(meta.side == .left)
+            #expect(meta.durationMinutes == 15)
+            #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.eventDetail(for: savedWithVolume) == "4 oz · 15m · Left side")
+
+        // CSV Duration column uses active 15m rather than 25m wall-clock span!
+        let csvWithPausedPump = store.exportPediatricianCSVString()
+        #expect(csvWithPausedPump.contains("4 oz · 15m · Left side,15m,Morning pump"))
+
+        // Undo finish restores paused activePump and removes event
+        store.undoLastToast()
+        #expect(store.activeEvents.count == beforeCount)
+        #expect(store.activePump?.isRunning == false)
+        #expect(store.activePump?.accumulatedSeconds == 900)
+
+        // Finish WITHOUT volume (duration-only)
+        let savedDurationOnly = try #require(store.finishPumpTimer())
+        #expect(store.activePump == nil)
+        #expect(store.toast?.message == "Pump logged · 15m")
+        if case .pump(let meta) = savedDurationOnly.metadata {
+            #expect(meta.amountMl == nil)
+            #expect(meta.durationMinutes == 15)
+            #expect(meta.side == .left)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.eventDetail(for: savedDurationOnly) == "15m · Left side")
+
+        // Manual logPump with amount + durationMinutes sets endedAt & formats cleanly
+        let manualStart = t0.addingTimeInterval(60 * 60)
+        let manualWithBoth = store.logPump(
+            startedAt: manualStart,
+            amount: 4,
+            unit: .oz,
+            side: .both,
+            durationMinutes: 15
+        )
+        #expect(manualWithBoth.endedAt == manualStart.addingTimeInterval(15 * 60))
+        #expect(store.toast?.message == "Pump logged · 4 oz · 15m")
+        #expect(store.eventDetail(for: manualWithBoth) == "4 oz · 15m · Both sides")
+
+        // Manual logPump with amount == 0 and durationMinutes > 0 stores amountMl == nil
+        let manualDurationOnly = store.logPump(
+            startedAt: manualStart.addingTimeInterval(30 * 60),
+            amount: 0,
+            unit: .oz,
+            side: .right,
+            durationMinutes: 12
+        )
+        #expect(manualDurationOnly.endedAt == manualStart.addingTimeInterval(42 * 60))
+        #expect(store.toast?.message == "Pump logged · 12m")
+        if case .pump(let meta) = manualDurationOnly.metadata {
+            #expect(meta.amountMl == nil)
+            #expect(meta.durationMinutes == 12)
+            #expect(meta.side == .right)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        #expect(store.eventDetail(for: manualDurationOnly) == "12m · Right side")
+    }
+
+    @Test("activePump is cleared on sign-out, account deletion, expired session, demo preview transitions, and household switch")
+    func activePumpClearedAcrossSessionAndHouseholdTransitions() async throws {
+        // 1. Demo preview enter & exit
+        let localStore = BlythesLifeStore.makeDemo()
+        localStore.startOrTogglePumpTimer(side: .both)
+        #expect(localStore.activePump != nil)
+        localStore.enterDemoPreview()
+        #expect(localStore.activePump == nil)
+
+        localStore.startOrTogglePumpTimer(side: .left)
+        #expect(localStore.activePump != nil)
+        localStore.exitDemoPreview()
+        #expect(localStore.activePump == nil)
+
+        // 2. Sync signOutOnThisDevice
+        localStore.startOrTogglePumpTimer(side: .right)
+        #expect(localStore.activePump != nil)
+        localStore.signOutOnThisDevice()
+        #expect(localStore.activePump == nil)
+
+        // 3. Async sign-out, delete account, expired session, and household switch
+        let mockAPI = MockBackendAPI()
+        let joinedHousehold = HouseholdDTO(
+            id: UUID(),
+            name: "Partner Household",
+            inviteCode: "998877",
+            createdBy: UUID(),
+            role: .member
+        )
+        let joinedProfile = ProfileDTO(
+            id: UUID(),
+            householdId: joinedHousehold.id,
+            displayName: "Blythe",
+            defaultTimezone: SampleSeedData.defaultTimeZoneIdentifier,
+            scheduleConfig: ScheduleConfig()
+        )
+        mockAPI.state.withLock {
+            $0.joinHouseholdHandler = { _, _ in
+                JoinHouseholdResponse(status: .approved, household: joinedHousehold)
+            }
+            $0.listProfilesHandler = { _ in [joinedProfile] }
+        }
+
+        let liveStore = BlythesLifeStore.makeDemo(
+            apiClient: mockAPI,
+            tokenStore: InMemoryAuthTokenStorage(
+                initialTokens: StoredAuthTokens(
+                    accessToken: "valid-token",
+                    refreshToken: "valid-refresh",
+                    expiresAt: Date().addingTimeInterval(3600),
+                    deviceId: "device-1"
+                )
+            ),
+            accessToken: "valid-token",
+            refreshToken: "valid-refresh"
+        )
+
+        // Household switch clears activePump
+        liveStore.startOrTogglePumpTimer(side: .both)
+        #expect(liveStore.activePump != nil)
+        try await liveStore.joinHouseholdAsync(inviteCode: "998877")
+        #expect(liveStore.activePump == nil)
+
+        // Async sign-out clears activePump
+        liveStore.startOrTogglePumpTimer(side: .both)
+        #expect(liveStore.activePump != nil)
+        await liveStore.signOutOnThisDeviceAsync()
+        #expect(liveStore.activePump == nil)
+
+        // Account deletion clears activePump
+        let deleteStore = BlythesLifeStore.makeDemo(
+            apiClient: mockAPI,
+            tokenStore: InMemoryAuthTokenStorage(
+                initialTokens: StoredAuthTokens(
+                    accessToken: "valid-token",
+                    refreshToken: "valid-refresh",
+                    expiresAt: Date().addingTimeInterval(3600),
+                    deviceId: "device-2"
+                )
+            ),
+            accessToken: "valid-token",
+            refreshToken: "valid-refresh"
+        )
+        deleteStore.startOrTogglePumpTimer(side: .left)
+        #expect(deleteStore.activePump != nil)
+        try await deleteStore.deleteAccountAsync()
+        #expect(deleteStore.activePump == nil)
+
+        // Expired session clears activePump
+        let expiredAPI = MockBackendAPI()
+        expiredAPI.state.withLock {
+            $0.syncPullHandler = { _, _, _ in throw BackendAPIError.unauthorized }
+            $0.refreshHandler = { _ in throw BackendAPIError.unauthorized }
+        }
+        let expiredStore = BlythesLifeStore.makeDemo(
+            apiClient: expiredAPI,
+            tokenStore: InMemoryAuthTokenStorage(
+                initialTokens: StoredAuthTokens(
+                    accessToken: "expired-access",
+                    refreshToken: "expired-refresh",
+                    expiresAt: Date().addingTimeInterval(-60),
+                    deviceId: "device-3"
+                )
+            ),
+            accessToken: "expired-access",
+            refreshToken: "expired-refresh"
+        )
+        expiredStore.startOrTogglePumpTimer(side: .both)
+        #expect(expiredStore.activePump != nil)
+        await expiredStore.pullFromServer()
+        #expect(expiredStore.sessionStage == .signedOut)
+        #expect(expiredStore.activePump == nil)
     }
 }
 
@@ -3410,8 +3816,51 @@ struct PortabilityAndInfrastructureTests {
         #expect(decoded.hasCompletedHouseholdSetup == true)
         #expect(decoded.isDemoPreview == false)
         #expect(decoded.pendingJoinRequest == nil)
+        #expect(decoded.activePumpSession == nil)
         #expect(decoded.profile.id == seed.profile.id)
         #expect(decoded.household.id == seed.household.id)
+    }
+
+    @Test("Legacy PersistedAppState missing activePumpSession and ActiveNursingSession missing lastActiveSide decode cleanly")
+    func legacyActiveSessionBackwardCompatibleDecode() throws {
+        var seed = SampleSeedData.makeDemoState()
+        let startedAt = makeDate(hour: 12, minute: 0)
+        seed.activeNursingSession = ActiveNursingSession(
+            startedAt: startedAt,
+            leftAccumulatedSeconds: 180,
+            rightAccumulatedSeconds: 60,
+            activeSide: .right,
+            activeSegmentStartedAt: startedAt.addingTimeInterval(180),
+            lastActiveSide: .right
+        )
+        seed.activePumpSession = ActivePumpSession(
+            startedAt: startedAt,
+            accumulatedSeconds: 420,
+            isRunning: false,
+            activeSegmentStartedAt: nil,
+            side: .left
+        )
+
+        let encoded = try BlythesLifeJSONCoding.makeEncoder().encode(seed)
+        let roundTripped = try BlythesLifeJSONCoding.makeDecoder().decode(PersistedAppState.self, from: encoded)
+        #expect(roundTripped.activeNursingSession?.lastActiveSide == .right)
+        #expect(roundTripped.activePumpSession == seed.activePumpSession)
+
+        // Strip newly added keys to simulate pre-upgrade on-disk state
+        var jsonObj = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        jsonObj.removeValue(forKey: "activePumpSession")
+        var nursingObj = try #require(jsonObj["activeNursingSession"] as? [String: Any])
+        nursingObj.removeValue(forKey: "lastActiveSide")
+        jsonObj["activeNursingSession"] = nursingObj
+
+        let legacyData = try JSONSerialization.data(withJSONObject: jsonObj)
+        let decoded = try BlythesLifeJSONCoding.makeDecoder().decode(PersistedAppState.self, from: legacyData)
+        #expect(decoded.activePumpSession == nil)
+        let decodedNursing = try #require(decoded.activeNursingSession)
+        #expect(decodedNursing.leftAccumulatedSeconds == 180)
+        #expect(decodedNursing.rightAccumulatedSeconds == 60)
+        #expect(decodedNursing.activeSide == .right)
+        #expect(decodedNursing.lastActiveSide == nil)
     }
 
     @Test("SyncSSEParser parses single-line and multi-line SSE notifications while ignoring keepalives")

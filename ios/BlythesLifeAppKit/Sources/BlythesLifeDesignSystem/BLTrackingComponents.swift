@@ -753,17 +753,20 @@ public struct BLNursingTimer: View {
     private let leftSeconds: Int
     private let rightSeconds: Int
     private let activeSide: String?
+    private let lastSide: String?
     private let onTapSide: (String) -> Void
 
     public init(
         leftSeconds: Int,
         rightSeconds: Int,
         activeSide: String?,
+        lastSide: String? = nil,
         onTapSide: @escaping (String) -> Void
     ) {
         self.leftSeconds = leftSeconds
         self.rightSeconds = rightSeconds
         self.activeSide = activeSide
+        self.lastSide = lastSide
         self.onTapSide = onTapSide
     }
 
@@ -794,8 +797,15 @@ public struct BLNursingTimer: View {
             onTapSide(id)
         } label: {
             VStack(alignment: .leading, spacing: BLSpacing.space1) {
-                Text(label)
-                    .blMicroLabel()
+                HStack(spacing: BLSpacing.space2) {
+                    Text(label)
+                        .blMicroLabel()
+                    Spacer(minLength: 4)
+                    if lastSide == id && activeSide == nil && leftSeconds == 0 && rightSeconds == 0 {
+                        BLBadge("Last", tone: .neutral)
+                    }
+                }
+                .frame(minHeight: 22)
 
                 Text(Self.formatMMSS(seconds))
                     .blTextRole(.display)

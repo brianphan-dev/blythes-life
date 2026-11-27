@@ -244,6 +244,11 @@ public struct TodayView: View {
                 .padding(.top, BLSpacing.space2)
         }
 
+        if let pump = store.activePump {
+            activePumpBanner(session: pump)
+                .padding(.top, BLSpacing.space2)
+        }
+
         HStack(alignment: .top, spacing: BLSpacing.space2) {
             BLGlanceStat(
                 kind: feed.isNursing ? .nursing : .feeding,
@@ -357,6 +362,36 @@ public struct TodayView: View {
                         .lineLimit(1)
 
                     Text("\(stateDescription) · tap to switch or finish")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: BLSymbol.chevronRight)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .padding(.vertical, BLSpacing.space3)
+            .padding(.horizontal, 14)
+        }
+    }
+
+    private func activePumpBanner(session: ActivePumpSession) -> some View {
+        let elapsed = session.elapsedSeconds(asOf: store.now)
+        let stateDescription = session.isRunning ? "Running" : "Paused"
+
+        return BLCard(tone: .accent, isFlush: true, onTap: { onOpenLog(.pump) }) {
+            HStack(spacing: BLSpacing.space3) {
+                BLEventIcon(kind: .pump, size: .md)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Pump · \(FormattingHelpers.formatMMSS(seconds: Int(elapsed)))")
+                        .font(BLFont.ui(size: 16, weight: .semibold, tabularNumerals: true))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+
+                    Text("\(stateDescription) · \(FormattingHelpers.formatSide(session.side)) · tap to finish")
                         .blTextRole(.caption)
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
@@ -529,6 +564,11 @@ public struct TodayView: View {
             if let session = store.activeNursing {
                 let elapsed = session.elapsedSeconds(asOf: store.now)
                 return FormattingHelpers.formatMMSS(seconds: Int(elapsed.total))
+            }
+            return store.lastNursingSideInfo.map { "Last: \($0.side == .left ? "Left" : "Right")" }
+        case .pump:
+            if let session = store.activePump {
+                return FormattingHelpers.formatMMSS(seconds: Int(session.elapsedSeconds(asOf: store.now)))
             }
             return nil
         default:

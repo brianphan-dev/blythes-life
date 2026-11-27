@@ -982,6 +982,159 @@ struct ModelCodingTests {
         #expect(decodedSession.households.first?.pendingJoinRequests == nil)
         #expect(decodedSession.pendingJoinRequests == nil)
     }
+
+    @Test("FeedingMetadata lastSide round-trips as snake_case last_side and stays backward-compatible with legacy JSON")
+    func feedingMetadataLastSideRoundTripAndLegacyCompatibility() throws {
+        let feeding = FeedingMetadata(
+            method: .breast,
+            substance: .breastMilk,
+            amountMl: nil,
+            displayUnit: .oz,
+            side: .both,
+            durationMinutes: 14,
+            leftDurationSeconds: 420,
+            rightDurationSeconds: 420,
+            lastSide: .right
+        )
+        let data = try encoder.encode(feeding)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"side\":\"both\""))
+        #expect(json.contains("\"last_side\":\"right\""))
+
+        let decoded = try decoder.decode(FeedingMetadata.self, from: data)
+        #expect(decoded == feeding)
+        #expect(decoded.lastSide == .right)
+
+        // Standalone EventMetadata decoding preserves last_side.
+        let standalone = try decoder.decode(EventMetadata.self, from: data)
+        #expect(standalone == .feeding(feeding))
+
+        // Legacy JSON omitting last_side decodes cleanly with lastSide == nil.
+        let legacyJSON = """
+        {
+          "method": "breast",
+          "substance": "breast_milk",
+          "display_unit": "oz",
+          "side": "both",
+          "duration_minutes": 12,
+          "left_duration_seconds": 360,
+          "right_duration_seconds": 360
+        }
+        """
+        let decodedLegacy = try decoder.decode(FeedingMetadata.self, from: Data(legacyJSON.utf8))
+        #expect(decodedLegacy.method == .breast)
+        #expect(decodedLegacy.side == .both)
+        #expect(decodedLegacy.lastSide == nil)
+
+        // Convenience oz initializer defaults lastSide to nil.
+        let bottle = FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: 4.0)
+        #expect(bottle.lastSide == nil)
+    }
+
+    @Test("DiaperMetadata poopColor round-trips for all 7 PoopColor cases and stays backward-compatible with legacy JSON")
+    func diaperMetadataPoopColorRoundTripAndLegacyCompatibility() throws {
+        let expectedColors: [PoopColor] = [.yellow, .brown, .green, .orange, .black, .red, .pale]
+        #expect(PoopColor.allCases == expectedColors)
+
+        for color in PoopColor.allCases {
+            let diaper = DiaperMetadata(
+                peeSize: .small,
+                poopSize: .medium,
+                rash: false,
+                poopColor: color
+            )
+            let data = try encoder.encode(diaper)
+            let json = try #require(String(data: data, encoding: .utf8))
+            #expect(json.contains("\"poop_size\":\"M\""))
+            #expect(json.contains("\"poop_color\":\"\(color.rawValue)\""))
+
+            let decoded = try decoder.decode(DiaperMetadata.self, from: data)
+            #expect(decoded == diaper)
+            #expect(decoded.poopColor == color)
+        }
+
+        // Standalone EventMetadata recognizes poop_color as a diaper discriminator key.
+        let poopColorOnlyJSON = Data(#"{"poop_color":"yellow"}"#.utf8)
+        let standalone = try decoder.decode(EventMetadata.self, from: poopColorOnlyJSON)
+        #expect(standalone == .diaper(DiaperMetadata(peeSize: nil, poopSize: nil, rash: false, poopColor: .yellow)))
+
+        // Legacy JSON omitting poop_color and poop_consistency decodes cleanly with nil defaults.
+        let legacyJSON = Data(#"{"pee_size":"L","poop_size":"M","rash":true}"#.utf8)
+        let decodedLegacy = try decoder.decode(DiaperMetadata.self, from: legacyJSON)
+        #expect(decodedLegacy.peeSize == .large)
+        #expect(decodedLegacy.poopSize == .medium)
+        #expect(decodedLegacy.rash == true)
+        #expect(decodedLegacy.poopColor == nil)
+        #expect(decodedLegacy.poopConsistency == nil)
+    }
+
+    @Test("DiaperMetadata poopConsistency round-trips for all 7 PoopConsistency cases and stays backward-compatible with legacy JSON")
+    func diaperMetadataPoopConsistencyRoundTripAndLegacyCompatibility() throws {
+        let expectedConsistencies: [PoopConsistency] = [.watery, .runny, .seedy, .soft, .firm, .hard, .mucousy]
+        #expect(PoopConsistency.allCases == expectedConsistencies)
+
+        for consistency in PoopConsistency.allCases {
+            let diaper = DiaperMetadata(
+                peeSize: .medium,
+                poopSize: .large,
+                rash: false,
+                poopColor: .yellow,
+                poopConsistency: consistency
+            )
+            let data = try encoder.encode(diaper)
+            let json = try #require(String(data: data, encoding: .utf8))
+            #expect(json.contains("\"poop_size\":\"L\""))
+            #expect(json.contains("\"poop_color\":\"yellow\""))
+            #expect(json.contains("\"poop_consistency\":\"\(consistency.rawValue)\""))
+
+            let decoded = try decoder.decode(DiaperMetadata.self, from: data)
+            #expect(decoded == diaper)
+            #expect(decoded.poopConsistency == consistency)
+        }
+
+        // Standalone EventMetadata recognizes poop_consistency as a diaper discriminator key.
+        let consistencyOnlyJSON = Data(#"{"poop_consistency":"seedy"}"#.utf8)
+        let standalone = try decoder.decode(EventMetadata.self, from: consistencyOnlyJSON)
+        #expect(standalone == .diaper(DiaperMetadata(peeSize: nil, poopSize: nil, rash: false, poopColor: nil, poopConsistency: .seedy)))
+
+        // Legacy JSON with poop_color but omitting poop_consistency decodes cleanly with poopConsistency == nil.
+        let legacyWithoutConsistencyJSON = Data(#"{"poop_size":"S","poop_color":"brown","rash":false}"#.utf8)
+        let decodedLegacy = try decoder.decode(DiaperMetadata.self, from: legacyWithoutConsistencyJSON)
+        #expect(decodedLegacy.poopSize == .small)
+        #expect(decodedLegacy.poopColor == .brown)
+        #expect(decodedLegacy.poopConsistency == nil)
+    }
+
+    @Test("PumpMetadata with amountMl, displayUnit, side, and durationMinutes round-trips cleanly")
+    func pumpMetadataRoundTripWithDurationMinutes() throws {
+        let pump = PumpMetadata(
+            amountMl: 133.1,
+            displayUnit: .oz,
+            side: .both,
+            durationMinutes: 18
+        )
+        let data = try encoder.encode(pump)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"amount_ml\":133.1"))
+        #expect(json.contains("\"display_unit\":\"oz\""))
+        #expect(json.contains("\"side\":\"both\""))
+        #expect(json.contains("\"duration_minutes\":18"))
+
+        let decoded = try decoder.decode(PumpMetadata.self, from: data)
+        #expect(decoded == pump)
+        #expect(decoded.durationMinutes == 18)
+
+        let standalone = try decoder.decode(EventMetadata.self, from: data)
+        #expect(standalone == .pump(pump))
+
+        // Legacy JSON omitting duration_minutes decodes cleanly with durationMinutes == nil.
+        let legacyJSON = Data(#"{"amount_ml":90,"display_unit":"ml","side":"left"}"#.utf8)
+        let decodedLegacy = try decoder.decode(PumpMetadata.self, from: legacyJSON)
+        #expect(decodedLegacy.amountMl == 90)
+        #expect(decodedLegacy.displayUnit == .ml)
+        #expect(decodedLegacy.side == .left)
+        #expect(decodedLegacy.durationMinutes == nil)
+    }
 }
 
 @Suite("UnitConversion")

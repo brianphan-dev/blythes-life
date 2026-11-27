@@ -217,6 +217,32 @@ public enum FormattingHelpers: Sendable {
         }
     }
 
+    /// Formats an optional diaper poop color label (`"Yellow"`, `"Brown"`, `"Green"`, `"Orange"`, `"Black"`, `"Red"`, `"Pale"`).
+    public static func formatPoopColor(_ color: PoopColor) -> String {
+        switch color {
+        case .yellow: "Yellow"
+        case .brown: "Brown"
+        case .green: "Green"
+        case .orange: "Orange"
+        case .black: "Black"
+        case .red: "Red"
+        case .pale: "Pale"
+        }
+    }
+
+    /// Formats an optional diaper poop consistency label (`"Watery"`, `"Runny"`, `"Seedy"`, `"Soft"`, `"Firm"`, `"Hard"`, `"Mucousy"`).
+    public static func formatPoopConsistency(_ consistency: PoopConsistency) -> String {
+        switch consistency {
+        case .watery: "Watery"
+        case .runny: "Runny"
+        case .seedy: "Seedy"
+        case .soft: "Soft"
+        case .firm: "Firm"
+        case .hard: "Hard"
+        case .mucousy: "Mucousy"
+        }
+    }
+
     /// Returns the display title for a logged event, matching the design system voice.
     public static func eventTitle(_ event: EventDTO, napNumber: Int? = nil) -> String {
         switch event.metadata {
@@ -290,15 +316,22 @@ public enum FormattingHelpers: Sendable {
                     }
                     return Double(leftSec + rightSec) / 60.0
                 }()
+                let endedSuffix: String = {
+                    guard let last = meta.lastSide, last == .left || last == .right else {
+                        return ""
+                    }
+                    return " · Ended \(last == .left ? "left" : "right")"
+                }()
                 if leftSec > 0 && rightSec > 0 {
                     let lm = max(1, Int((Double(leftSec) / 60.0).rounded()))
                     let rm = max(1, Int((Double(rightSec) / 60.0).rounded()))
                     let total = max(Int(fallbackMinutes.rounded()), lm + rm)
-                    return "\(total)m · Left \(lm)m, Right \(rm)m"
+                    return "\(total)m · Left \(lm)m, Right \(rm)m\(endedSuffix)"
                 }
                 let total = max(1, Int(fallbackMinutes.rounded()))
                 let side = meta.side ?? (leftSec > 0 ? .left : (rightSec > 0 ? .right : .both))
-                return "\(total)m · \(formatSide(side))"
+                let suffix = (side == .both) ? endedSuffix : ""
+                return "\(total)m · \(formatSide(side))\(suffix)"
             }
 
             let amountText: String
@@ -316,14 +349,31 @@ public enum FormattingHelpers: Sendable {
             return "\(amountText) \(substanceText)"
 
         case .pump(let meta):
-            let amountText: String
+            var parts: [String] = []
+            let durationMins: Double? = {
+                if let explicit = meta.durationMinutes, explicit > 0 {
+                    return explicit
+                }
+                if let endedAt = event.endedAt {
+                    let wall = endedAt.timeIntervalSince(event.startedAt) / 60.0
+                    return wall > 0 ? wall : nil
+                }
+                return nil
+            }()
+
             if let amountMl = meta.amountMl {
                 let displayValue = preferredUnit == .oz ? UnitConversion.mlToOz(amountMl) : amountMl
-                amountText = formatAmount(displayValue, unit: preferredUnit)
-            } else {
-                amountText = formatAmount(0, unit: preferredUnit)
+                parts.append(formatAmount(displayValue, unit: preferredUnit))
+            } else if durationMins == nil {
+                parts.append(formatAmount(0, unit: preferredUnit))
             }
-            return "\(amountText) · \(formatSide(meta.side))"
+
+            if let mins = durationMins {
+                parts.append("\(max(1, Int(mins.rounded())))m")
+            }
+
+            parts.append(formatSide(meta.side))
+            return parts.joined(separator: " · ")
 
         case .diaper(let meta):
             var parts: [String] = []
@@ -331,7 +381,15 @@ public enum FormattingHelpers: Sendable {
                 parts.append("Pee \(pee.shortLabel)")
             }
             if let poop = meta.poopSize {
-                parts.append("Poop \(poop.shortLabel)")
+                let traits = [
+                    meta.poopColor.map(formatPoopColor),
+                    meta.poopConsistency.map(formatPoopConsistency)
+                ].compactMap { $0 }
+                if traits.isEmpty {
+                    parts.append("Poop \(poop.shortLabel)")
+                } else {
+                    parts.append("Poop \(poop.shortLabel) (\(traits.joined(separator: ", ")))")
+                }
             }
             if meta.rash {
                 parts.append("Rash")

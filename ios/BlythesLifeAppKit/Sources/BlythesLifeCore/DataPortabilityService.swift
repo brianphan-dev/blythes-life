@@ -87,7 +87,7 @@ public enum DataPortabilityService: Sendable {
         dateFormatter.dateFormat = "yyyy-MM-dd"
 
         let active = events
-            .filter { $0.deletedAt == nil }
+            .filter { $0.deletedAt == nil && !$0.isOpenLiveTimer }
             .sorted { lhs, rhs in
                 if lhs.startedAt != rhs.startedAt {
                     return lhs.startedAt < rhs.startedAt

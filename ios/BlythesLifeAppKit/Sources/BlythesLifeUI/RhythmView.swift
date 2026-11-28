@@ -59,7 +59,10 @@ public struct RhythmView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: BLSpacing.space4) {
                         if let selectedDay {
-                            dayTotalsCard(day: selectedDay)
+                            dayTotalsCard(
+                                day: selectedDay,
+                                showPumpedRow: selectedDay.pumpCount > 0 || store.rhythmWeekPumpCount > 0
+                            )
                             selectedDayEventsSection(day: selectedDay)
                         }
                     }
@@ -79,8 +82,11 @@ public struct RhythmView: View {
                             legendView
                             rhythmChart(days: days, selectedIndex: clampedIndex, chartHeight: 384)
                             if let selectedDay {
-                                dayTotalsCard(day: selectedDay)
-                                    .padding(.top, BLSpacing.space3)
+                                dayTotalsCard(
+                                    day: selectedDay,
+                                    showPumpedRow: selectedDay.pumpCount > 0 || store.rhythmWeekPumpCount > 0
+                                )
+                                .padding(.top, BLSpacing.space3)
                                 selectedDayEventsSection(day: selectedDay)
                                     .padding(.top, BLSpacing.space3)
                             }
@@ -99,9 +105,21 @@ public struct RhythmView: View {
     // MARK: - Header & Legend
 
     private var headerView: some View {
-        HStack(alignment: .bottom) {
+        let unit = store.preferredUnit
+        let subtitle: String = {
+            if store.rhythmWeekPumpCount > 0 {
+                let pumpedWeekText = FormattingHelpers.formatAmount(
+                    unit == .oz ? store.rhythmWeekTotalPumpedOz : store.rhythmWeekTotalPumpedMl,
+                    unit: unit
+                )
+                return "\(store.rhythmWeekRangeTitle) · \(pumpedWeekText) pumped"
+            }
+            return store.rhythmWeekRangeTitle
+        }()
+
+        return HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.rhythmWeekRangeTitle)
+                Text(subtitle)
                     .blMicroLabel()
                 Text("Rhythm")
                     .blTextRole(.display)
@@ -139,6 +157,13 @@ public struct RhythmView: View {
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                     .fill(theme.feeding.ink)
                     .frame(width: 5, height: 11)
+            }
+            legendItem(label: "Pump") {
+                Rectangle()
+                    .fill(theme.pump.solid)
+                    .frame(width: 7, height: 7)
+                    .rotationEffect(.degrees(45))
+                    .frame(width: 10, height: 10)
             }
             legendItem(label: "Meal") {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -246,7 +271,7 @@ public struct RhythmView: View {
 
     // MARK: - Day Totals & Selected Day Timeline
 
-    private func dayTotalsCard(day: RhythmDaySummary) -> some View {
+    private func dayTotalsCard(day: RhythmDaySummary, showPumpedRow: Bool) -> some View {
         let unit = store.preferredUnit
         let milkText = FormattingHelpers.formatAmount(
             unit == .oz ? day.totalBottleOz : day.totalBottleMl,
@@ -257,6 +282,11 @@ public struct RhythmView: View {
         let nursingSessionNoun = day.nursingCount == 1 ? "session" : "sessions"
         let nursingOnly = day.nursingCount > 0 && day.bottleCount == 0
         let bothBottlesAndNursing = day.nursingCount > 0 && day.bottleCount > 0
+        let pumpedText = FormattingHelpers.formatAmount(
+            unit == .oz ? day.totalPumpedOz : day.totalPumpedMl,
+            unit: unit
+        )
+        let pumpSessionNoun = day.pumpCount == 1 ? "session" : "sessions"
 
         return BLCard {
             VStack(alignment: .leading, spacing: BLSpacing.space2) {
@@ -318,6 +348,26 @@ public struct RhythmView: View {
                             .font(BLFont.display(size: 19, weight: .medium, tabularNumerals: true))
                             .foregroundStyle(theme.textPrimary)
                         Text("· \(day.nursingCount) \(nursingSessionNoun)")
+                            .blTextRole(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .padding(.top, 2)
+                }
+
+                if showPumpedRow {
+                    Rectangle()
+                        .fill(theme.borderHairline)
+                        .frame(height: BLSpacing.borderWidth)
+                        .padding(.top, BLSpacing.space1)
+
+                    HStack(alignment: .firstTextBaseline, spacing: BLSpacing.space2) {
+                        Text("Pumped")
+                            .blMicroLabel()
+                        Spacer()
+                        Text(pumpedText)
+                            .font(BLFont.display(size: 19, weight: .medium, tabularNumerals: true))
+                            .foregroundStyle(theme.textPrimary)
+                        Text("· \(day.pumpCount) \(pumpSessionNoun)")
                             .blTextRole(.caption)
                             .foregroundStyle(theme.textSecondary)
                     }
@@ -393,6 +443,7 @@ public struct RhythmView: View {
         let calendar = store.profileCalendar
         return store.activeEvents
             .filter { event in
+                guard !event.isOpenLiveTimer else { return false }
                 if case .sleep(let meta) = event.metadata, meta.sleepType == .night, let endedAt = event.endedAt {
                     return calendar.isDate(endedAt, inSameDayAs: day.date) || calendar.isDate(event.startedAt, inSameDayAs: day.date)
                 }
@@ -445,7 +496,7 @@ private struct RhythmDayColumn: View {
             }
 
             // 3. Bottle marks (formula solid dot, breast milk hollow ring)
-            let bottleX = size.width * 0.20
+            let bottleX = size.width * 0.18
             for mark in day.bottleMarks {
                 let y = CGFloat(mark.minute) * pxPerMinute
                 let dotRect = CGRect(x: bottleX - 4.5, y: y - 4.5, width: 9, height: 9)
@@ -459,7 +510,7 @@ private struct RhythmDayColumn: View {
             }
 
             // 4. Nursing vertical bars (dedicated lane with paper halo for high contrast on paper & sleep spans)
-            let nursingX = size.width * 0.42
+            let nursingX = size.width * 0.37
             for span in day.nursingSpans {
                 let top = CGFloat(span.startMinute) * pxPerMinute
                 let height = max(10, CGFloat(span.durationMinutes) * pxPerMinute)
@@ -475,8 +526,27 @@ private struct RhythmDayColumn: View {
                 }
             }
 
-            // 5. Meal squares
-            let mealX = size.width * 0.65
+            // 5. Pump diamonds (7×7 rotated square with subtle paper halo)
+            let pumpX = size.width * 0.54
+            let diamondHalfDiagonal: CGFloat = 3.5 * sqrt(2.0)
+            for mark in day.pumpMarks {
+                let y = CGFloat(mark.minute) * pxPerMinute
+                var diamondPath = Path()
+                diamondPath.move(to: CGPoint(x: pumpX, y: y - diamondHalfDiagonal))
+                diamondPath.addLine(to: CGPoint(x: pumpX + diamondHalfDiagonal, y: y))
+                diamondPath.addLine(to: CGPoint(x: pumpX, y: y + diamondHalfDiagonal))
+                diamondPath.addLine(to: CGPoint(x: pumpX - diamondHalfDiagonal, y: y))
+                diamondPath.closeSubpath()
+
+                context.stroke(diamondPath, with: .color(theme.bgSurface), lineWidth: 1.5)
+                context.fill(diamondPath, with: .color(theme.pump.solid))
+                if mark.isLive {
+                    context.stroke(diamondPath, with: .color(theme.accent), lineWidth: 1.5)
+                }
+            }
+
+            // 6. Meal squares
+            let mealX = size.width * 0.72
             for minute in day.mealMinutes {
                 let y = CGFloat(minute) * pxPerMinute
                 let rect = CGRect(x: mealX - 4, y: y - 4, width: 8, height: 8)
@@ -486,9 +556,9 @@ private struct RhythmDayColumn: View {
                 )
             }
 
-            // 6. Diaper horizontal dashes
-            let diaperWidth: CGFloat = min(9, max(5, size.width * 0.15))
-            let diaperX = max(0, size.width * 0.90 - diaperWidth)
+            // 7. Diaper horizontal dashes
+            let diaperWidth: CGFloat = min(7, max(5, size.width * 0.13))
+            let diaperX = max(0, min(size.width - diaperWidth - 1.5, size.width * 0.90 - diaperWidth / 2))
             for minute in day.diaperMinutes {
                 let y = CGFloat(minute) * pxPerMinute
                 let rect = CGRect(x: diaperX, y: y - 1.5, width: diaperWidth, height: 3)
@@ -498,7 +568,7 @@ private struct RhythmDayColumn: View {
                 )
             }
 
-            // 7. Honey "now" horizontal line on Today's column
+            // 8. Honey "now" horizontal line on Today's column
             if let nowMinutes {
                 let y = CGFloat(nowMinutes) * pxPerMinute
                 let rect = CGRect(x: 0, y: y - 1, width: size.width, height: 2)

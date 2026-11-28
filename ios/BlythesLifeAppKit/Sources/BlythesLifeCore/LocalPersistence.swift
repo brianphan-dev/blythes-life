@@ -91,6 +91,7 @@ public struct SyncOutboxItem: Codable, Sendable, Identifiable, Equatable, Hashab
 
 /// Active left/right nursing timer persisted across app launches and shared with widgets/devices.
 public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
+    public var eventId: UUID?
     public var startedAt: Date
     public var leftAccumulatedSeconds: TimeInterval
     public var rightAccumulatedSeconds: TimeInterval
@@ -99,6 +100,7 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
     public var lastActiveSide: BreastSide?
 
     public init(
+        eventId: UUID? = nil,
         startedAt: Date,
         leftAccumulatedSeconds: TimeInterval = 0,
         rightAccumulatedSeconds: TimeInterval = 0,
@@ -106,6 +108,7 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
         activeSegmentStartedAt: Date? = nil,
         lastActiveSide: BreastSide? = nil
     ) {
+        self.eventId = eventId
         self.startedAt = startedAt
         self.leftAccumulatedSeconds = leftAccumulatedSeconds
         self.rightAccumulatedSeconds = rightAccumulatedSeconds
@@ -115,6 +118,7 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case eventId
         case startedAt
         case leftAccumulatedSeconds
         case rightAccumulatedSeconds
@@ -125,6 +129,7 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.eventId = try container.decodeIfPresent(UUID.self, forKey: .eventId)
         self.startedAt = try container.decode(Date.self, forKey: .startedAt)
         self.leftAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .leftAccumulatedSeconds) ?? 0
         self.rightAccumulatedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .rightAccumulatedSeconds) ?? 0
@@ -154,6 +159,7 @@ public struct ActiveNursingSession: Codable, Sendable, Equatable, Hashable {
 /// Active independent dual-side pumping timer persisted across app launches.
 /// Tracks left, right, and union-of-active-intervals session elapsed durations independently.
 public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
+    public var eventId: UUID?
     public var startedAt: Date
     public var leftAccumulatedSeconds: TimeInterval
     public var rightAccumulatedSeconds: TimeInterval
@@ -163,6 +169,7 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
     public var sessionSegmentStartedAt: Date?
 
     public init(
+        eventId: UUID? = nil,
         startedAt: Date,
         leftAccumulatedSeconds: TimeInterval = 0,
         rightAccumulatedSeconds: TimeInterval = 0,
@@ -171,6 +178,7 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
         sessionAccumulatedSeconds: TimeInterval = 0,
         sessionSegmentStartedAt: Date? = nil
     ) {
+        self.eventId = eventId
         self.startedAt = startedAt
         self.leftAccumulatedSeconds = leftAccumulatedSeconds
         self.rightAccumulatedSeconds = rightAccumulatedSeconds
@@ -211,6 +219,7 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case eventId
         case startedAt
         case leftAccumulatedSeconds
         case rightAccumulatedSeconds
@@ -229,6 +238,7 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.eventId = try container.decodeIfPresent(UUID.self, forKey: .eventId)
         let startedAt = try container.decode(Date.self, forKey: .startedAt)
         self.startedAt = startedAt
 
@@ -265,6 +275,7 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(eventId, forKey: .eventId)
         try container.encode(startedAt, forKey: .startedAt)
         try container.encode(leftAccumulatedSeconds, forKey: .leftAccumulatedSeconds)
         try container.encode(rightAccumulatedSeconds, forKey: .rightAccumulatedSeconds)
@@ -272,6 +283,62 @@ public struct ActivePumpSession: Codable, Sendable, Equatable, Hashable {
         try container.encodeIfPresent(rightSegmentStartedAt, forKey: .rightSegmentStartedAt)
         try container.encode(sessionAccumulatedSeconds, forKey: .sessionAccumulatedSeconds)
         try container.encodeIfPresent(sessionSegmentStartedAt, forKey: .sessionSegmentStartedAt)
+    }
+}
+
+/// Per-device local notification preferences for pump reminders and active pump timer alerts.
+public struct PumpNotificationSettings: Codable, Sendable, Equatable, Hashable {
+    public static let defaultIntervalMinutes = 180
+    public static let defaultQuietStartMinutesFromMidnight = 1320
+    public static let defaultQuietEndMinutesFromMidnight = 360
+
+    public var isEnabled: Bool
+    public var intervalMinutes: Int
+    public var quietHoursEnabled: Bool
+    public var quietStartMinutesFromMidnight: Int
+    public var quietEndMinutesFromMidnight: Int
+    public var timerAlertMinutes: Int?
+
+    public init(
+        isEnabled: Bool = false,
+        intervalMinutes: Int = PumpNotificationSettings.defaultIntervalMinutes,
+        quietHoursEnabled: Bool = false,
+        quietStartMinutesFromMidnight: Int = PumpNotificationSettings.defaultQuietStartMinutesFromMidnight,
+        quietEndMinutesFromMidnight: Int = PumpNotificationSettings.defaultQuietEndMinutesFromMidnight,
+        timerAlertMinutes: Int? = nil
+    ) {
+        self.isEnabled = isEnabled
+        self.intervalMinutes = intervalMinutes
+        self.quietHoursEnabled = quietHoursEnabled
+        self.quietStartMinutesFromMidnight = quietStartMinutesFromMidnight
+        self.quietEndMinutesFromMidnight = quietEndMinutesFromMidnight
+        self.timerAlertMinutes = timerAlertMinutes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case isEnabled
+        case intervalMinutes
+        case quietHoursEnabled
+        case quietStartMinutesFromMidnight
+        case quietEndMinutesFromMidnight
+        case timerAlertMinutes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? false
+        self.intervalMinutes = try container.decodeIfPresent(Int.self, forKey: .intervalMinutes)
+            ?? Self.defaultIntervalMinutes
+        self.quietHoursEnabled = try container.decodeIfPresent(Bool.self, forKey: .quietHoursEnabled) ?? false
+        self.quietStartMinutesFromMidnight = try container.decodeIfPresent(
+            Int.self,
+            forKey: .quietStartMinutesFromMidnight
+        ) ?? Self.defaultQuietStartMinutesFromMidnight
+        self.quietEndMinutesFromMidnight = try container.decodeIfPresent(
+            Int.self,
+            forKey: .quietEndMinutesFromMidnight
+        ) ?? Self.defaultQuietEndMinutesFromMidnight
+        self.timerAlertMinutes = try container.decodeIfPresent(Int.self, forKey: .timerAlertMinutes)
     }
 }
 
@@ -295,6 +362,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
     public var hasCompletedHouseholdSetup: Bool
     public var isDemoPreview: Bool
     public var pendingJoinRequest: HouseholdJoinRequestDTO?
+    public var pumpNotificationSettings: PumpNotificationSettings
 
     public init(
         profile: ProfileDTO,
@@ -314,7 +382,8 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         isSignedInWithApple: Bool = true,
         hasCompletedHouseholdSetup: Bool = true,
         isDemoPreview: Bool = false,
-        pendingJoinRequest: HouseholdJoinRequestDTO? = nil
+        pendingJoinRequest: HouseholdJoinRequestDTO? = nil,
+        pumpNotificationSettings: PumpNotificationSettings = PumpNotificationSettings()
     ) {
         self.profile = profile
         self.household = household
@@ -334,6 +403,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         self.hasCompletedHouseholdSetup = hasCompletedHouseholdSetup
         self.isDemoPreview = isDemoPreview
         self.pendingJoinRequest = pendingJoinRequest
+        self.pumpNotificationSettings = pumpNotificationSettings
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -355,6 +425,7 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
         case hasCompletedHouseholdSetup
         case isDemoPreview
         case pendingJoinRequest
+        case pumpNotificationSettings
     }
 
     public init(from decoder: Decoder) throws {
@@ -380,6 +451,10 @@ public struct PersistedAppState: Codable, Sendable, Equatable {
             HouseholdJoinRequestDTO.self,
             forKey: .pendingJoinRequest
         )
+        self.pumpNotificationSettings = try container.decodeIfPresent(
+            PumpNotificationSettings.self,
+            forKey: .pumpNotificationSettings
+        ) ?? PumpNotificationSettings()
     }
 }
 

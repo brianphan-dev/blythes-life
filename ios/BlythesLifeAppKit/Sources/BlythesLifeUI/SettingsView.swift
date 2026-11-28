@@ -47,6 +47,7 @@ public struct SettingsView: View {
     @State private var isBabyProfileSheetOpen = false
     @State private var isScheduleSheetOpen = false
     @State private var isFeedMealSheetOpen = false
+    @State private var isPumpNotificationsSheetOpen = false
     @State private var isMembersSheetOpen = false
     @State private var isCreateInviteSheetOpen = false
     @State private var isJoinHouseholdSheetOpen = false
@@ -79,6 +80,7 @@ public struct SettingsView: View {
                             napScheduleGroup
                             feedMealScheduleGroup
                             loggingGroup
+                            notificationsGroup
                             #if DEBUG
                             posturePreviewGroup
                             #endif
@@ -113,6 +115,7 @@ public struct SettingsView: View {
                                 napScheduleGroup
                                 feedMealScheduleGroup
                                 loggingGroup
+                                notificationsGroup
                                 #if DEBUG
                                 posturePreviewGroup
                                 #endif
@@ -170,6 +173,18 @@ public struct SettingsView: View {
                 .zIndex(10)
             }
 
+            if isPumpNotificationsSheetOpen {
+                PumpNotificationsEditorSheet(
+                    initialSettings: store.pumpNotificationSettings,
+                    onClose: { isPumpNotificationsSheetOpen = false },
+                    onSave: { updated in
+                        await store.updatePumpNotificationSettings(updated)
+                        store.showInfoToast("Pump reminders updated")
+                    }
+                )
+                .zIndex(10)
+            }
+
             if isMembersSheetOpen {
                 HouseholdMembersSheet(
                     household: store.household,
@@ -222,6 +237,7 @@ public struct SettingsView: View {
             }
         }
         .task {
+            await store.refreshPumpNotificationAuthorization()
             if store.hasLiveSession {
                 await store.refreshHouseholdAsync()
             }
@@ -423,6 +439,15 @@ public struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var notificationsGroup: some View {
+        settingsGroup(title: "Notifications") {
+            PumpNotificationSettingsSection(
+                store: store,
+                onOpenEditor: { isPumpNotificationsSheetOpen = true }
+            )
         }
     }
 
@@ -917,6 +942,114 @@ private struct BabyProfileSettingsCard: View {
                 )
             }
         }
+    }
+}
+
+@MainActor
+private struct PumpNotificationSettingsSection: View {
+    @Environment(\.openURL) private var openURL
+
+    let store: BlythesLifeStore
+    let onOpenEditor: () -> Void
+
+    @State private var isUpdatingToggle = false
+
+    var body: some View {
+        let settings = store.pumpNotificationSettings
+        let authStatus = store.pumpNotificationAuthStatus
+        #if os(iOS) && canImport(UIKit)
+        let showsOpenSettingsRow = authStatus == .denied
+        #else
+        let showsOpenSettingsRow = false
+        #endif
+
+        let enabledBinding = Binding<Bool>(
+            get: { settings.isEnabled },
+            set: { newValue in
+                guard !isUpdatingToggle, newValue != store.pumpNotificationSettings.isEnabled else { return }
+                isUpdatingToggle = true
+                var updated = store.pumpNotificationSettings
+                updated.isEnabled = newValue
+                Task { @MainActor in
+                    defer { isUpdatingToggle = false }
+                    await store.updatePumpNotificationSettings(updated)
+                    if newValue && store.pumpNotificationAuthStatus == .denied {
+                        store.showInfoToast("Allow notifications in iOS Settings to enable pump reminders")
+                    }
+                }
+            }
+        )
+
+        BLCard(isFlush: true) {
+            VStack(spacing: 0) {
+                BLListRow(
+                    label: "Pump reminders",
+                    detail: toggleDetail(settings: settings, authStatus: authStatus),
+                    showDivider: showsOpenSettingsRow || settings.isEnabled
+                ) {
+                    BLSwitch(isOn: enabledBinding, label: "Pump reminders")
+                        .disabled(isUpdatingToggle)
+                }
+
+                #if os(iOS) && canImport(UIKit)
+                if showsOpenSettingsRow {
+                    BLListRow(
+                        label: "Open iOS Settings",
+                        showDivider: settings.isEnabled
+                    ) {
+                        BLButton("Open", variant: .secondary, size: .sm) {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                openURL(url)
+                            }
+                        }
+                    }
+                }
+                #endif
+
+                if settings.isEnabled {
+                    BLListRow(
+                        label: "Remind every",
+                        value: FormattingHelpers.formatWakeWindowFraction(minutes: settings.intervalMinutes),
+                        showsChevron: true,
+                        onTap: onOpenEditor
+                    )
+                    BLListRow(
+                        label: "Timer target alert",
+                        value: settings.timerAlertMinutes.map { "\($0)m" } ?? "Off",
+                        showsChevron: true,
+                        onTap: onOpenEditor
+                    )
+                    BLListRow(
+                        label: "Quiet hours",
+                        value: settings.quietHoursEnabled
+                            ? "\(FormattingHelpers.formatMinutesFromMidnight(settings.quietStartMinutesFromMidnight)) – \(FormattingHelpers.formatMinutesFromMidnight(settings.quietEndMinutesFromMidnight))"
+                            : "Off",
+                        showsChevron: true,
+                        showDivider: false,
+                        onTap: onOpenEditor
+                    )
+                }
+            }
+        }
+    }
+
+    private func toggleDetail(
+        settings: PumpNotificationSettings,
+        authStatus: PumpNotificationAuthorizationStatus
+    ) -> String {
+        if authStatus == .denied {
+            return "Notifications are off in iOS Settings"
+        }
+        if settings.isEnabled {
+            if let nextDate = store.nextScheduledPumpReminderDate {
+                return "Next reminder · \(FormattingHelpers.formatClock(nextDate, timeZone: store.profileTimeZone))"
+            }
+            if store.activePump != nil {
+                return "Timer active · next reminder schedules after finish"
+            }
+            return "Starts after your next pump"
+        }
+        return "This device only · remind when it is time to pump"
     }
 }
 
@@ -1438,6 +1571,173 @@ private struct FeedMealScheduleEditorSheet: View {
                 }
             }
         )
+    }
+}
+
+// MARK: - Pump Reminders Editor Sheet
+
+@MainActor
+private struct PumpNotificationsEditorSheet: View {
+    private static let intervalOptions: [Int] = [120, 150, 180, 210, 240, 300, 360]
+    private static let timerAlertOptions: [Int?] = [nil, 15, 20, 25, 30]
+
+    @Environment(\.blTheme) private var theme
+
+    let onClose: () -> Void
+    let onSave: @MainActor (PumpNotificationSettings) async -> Void
+
+    @State private var intervalMinutes: Int
+    @State private var timerAlertMinutes: Int?
+    @State private var quietHoursEnabled: Bool
+    @State private var quietStartDate: Date
+    @State private var quietEndDate: Date
+    @State private var isSaving = false
+    private let baseSettings: PumpNotificationSettings
+
+    init(
+        initialSettings: PumpNotificationSettings,
+        onClose: @escaping () -> Void,
+        onSave: @escaping @MainActor (PumpNotificationSettings) async -> Void
+    ) {
+        self.baseSettings = initialSettings
+        self.onClose = onClose
+        self.onSave = onSave
+        _intervalMinutes = State(initialValue: initialSettings.intervalMinutes)
+        _timerAlertMinutes = State(initialValue: initialSettings.timerAlertMinutes)
+        _quietHoursEnabled = State(initialValue: initialSettings.quietHoursEnabled)
+        _quietStartDate = State(
+            initialValue: Self.dateFromMinutesFromMidnight(initialSettings.quietStartMinutesFromMidnight)
+        )
+        _quietEndDate = State(
+            initialValue: Self.dateFromMinutesFromMidnight(initialSettings.quietEndMinutesFromMidnight)
+        )
+    }
+
+    var body: some View {
+        BLSheetContainer(
+            isPresented: true,
+            title: "Pump reminders",
+            showScrim: true,
+            onClose: onClose,
+            icon: {
+                BLEventIcon(kind: .pump, size: .md)
+            },
+            content: {
+                VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                    Text("Remind every")
+                        .blMicroLabel()
+
+                    BLFlowLayout(horizontalSpacing: BLSpacing.space2, verticalSpacing: BLSpacing.space2) {
+                        ForEach(Self.intervalOptions, id: \.self) { minutes in
+                            BLChip(
+                                FormattingHelpers.formatWakeWindowFraction(minutes: minutes),
+                                isSelected: intervalMinutes == minutes
+                            ) {
+                                intervalMinutes = minutes
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: BLSpacing.space2) {
+                    Text("Timer target alert")
+                        .blMicroLabel()
+
+                    BLFlowLayout(horizontalSpacing: BLSpacing.space2, verticalSpacing: BLSpacing.space2) {
+                        ForEach(Self.timerAlertOptions, id: \.self) { option in
+                            BLChip(
+                                option.map { "\($0)m" } ?? "Off",
+                                isSelected: timerAlertMinutes == option
+                            ) {
+                                timerAlertMinutes = option
+                            }
+                        }
+                    }
+
+                    Text("Alerts when a live pump timer reaches this length.")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                VStack(alignment: .leading, spacing: BLSpacing.space3) {
+                    Text("Quiet hours")
+                        .blMicroLabel()
+
+                    HStack(spacing: BLSpacing.space3) {
+                        Text("Pause overnight")
+                            .blTextRole(.body)
+                            .foregroundStyle(theme.textPrimary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        BLSwitch(isOn: $quietHoursEnabled, label: "Pause overnight")
+                    }
+
+                    if quietHoursEnabled {
+                        HStack(spacing: BLSpacing.space3) {
+                            BLTimeField(label: "Start", date: $quietStartDate)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            BLTimeField(label: "End", date: $quietEndDate)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    Text("Reminders during quiet hours wait until morning.")
+                        .blTextRole(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                }
+            },
+            footer: {
+                BLButton(
+                    isSaving ? "Saving…" : "Save reminders",
+                    variant: .primary,
+                    size: .lg,
+                    isBlock: true
+                ) {
+                    save()
+                }
+                .disabled(isSaving)
+            }
+        )
+    }
+
+    private func save() {
+        guard !isSaving else { return }
+        isSaving = true
+        var updated = baseSettings
+        updated.intervalMinutes = intervalMinutes
+        updated.timerAlertMinutes = timerAlertMinutes
+        updated.quietHoursEnabled = quietHoursEnabled
+        updated.quietStartMinutesFromMidnight = Self.minutesFromMidnight(from: quietStartDate)
+        updated.quietEndMinutesFromMidnight = Self.minutesFromMidnight(from: quietEndDate)
+
+        Task { @MainActor in
+            defer { isSaving = false }
+            await onSave(updated)
+            onClose()
+        }
+    }
+
+    private static func dateFromMinutesFromMidnight(_ rawMinutes: Int) -> Date {
+        let normalized = ((rawMinutes % 1440) + 1440) % 1440
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let components = DateComponents(
+            year: 2026,
+            month: 1,
+            day: 15,
+            hour: normalized / 60,
+            minute: normalized % 60
+        )
+        return calendar.date(from: components) ?? Date(timeIntervalSinceReferenceDate: 0)
+    }
+
+    private static func minutesFromMidnight(from date: Date) -> Int {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let hour = components.hour ?? 0
+        let minute = components.minute ?? 0
+        return ((hour * 60 + minute) % 1440 + 1440) % 1440
     }
 }
 

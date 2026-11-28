@@ -1341,6 +1341,433 @@ struct ModelCodingTests {
             )
         )
     }
+
+    @Test("Live nursing FeedingMetadata timer fields round-trip as snake_case JSON and stay backward-compatible")
+    func feedingMetadataLiveTimerRoundTripAndLegacyCompatibility() throws {
+        let t0 = fixedDate("2026-11-27T18:00:00.000Z")
+        let segStart = fixedDate("2026-11-27T18:05:30.250Z")
+        let activeNursing = FeedingMetadata(
+            method: .breast,
+            substance: .breastMilk,
+            amountMl: nil,
+            displayUnit: .oz,
+            side: .both,
+            durationMinutes: nil,
+            leftDurationSeconds: 330,
+            rightDurationSeconds: 0,
+            lastSide: .left,
+            isTimerActive: true,
+            activeSide: .right,
+            activeSegmentStartedAt: segStart
+        )
+
+        let data = try encoder.encode(activeNursing)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"is_timer_active\":true"))
+        #expect(json.contains("\"active_side\":\"right\""))
+        #expect(json.contains("\"active_segment_started_at\":\"2026-11-27T18:05:30.250Z\""))
+
+        let decoded = try decoder.decode(FeedingMetadata.self, from: data)
+        #expect(decoded == activeNursing)
+        #expect(decoded.isTimerActive == true)
+        #expect(decoded.activeSide == .right)
+        #expect(decoded.activeSegmentStartedAt == segStart)
+
+        // Standalone EventMetadata decoding routes live nursing payload to .feeding.
+        let standalone = try decoder.decode(EventMetadata.self, from: data)
+        #expect(standalone == .feeding(activeNursing))
+
+        // `active_side` / `active_segment_started_at` take feeding-branch precedence over `side` (never misrouted to .pump).
+        #expect(throws: DecodingError.self) {
+            _ = try decoder.decode(EventMetadata.self, from: Data(#"{"active_side":"left","side":"both"}"#.utf8))
+        }
+        #expect(throws: DecodingError.self) {
+            _ = try decoder.decode(
+                EventMetadata.self,
+                from: Data(#"{"active_segment_started_at":"2026-11-27T18:05:30.250Z","side":"both"}"#.utf8)
+            )
+        }
+
+        // Full EventDTO round-trip preserves live nursing fields and reports isOpenLiveTimer == true.
+        let userId = UUID()
+        let event = EventDTO(
+            profileId: UUID(),
+            eventType: .feeding,
+            startedAt: t0,
+            endedAt: nil,
+            timezone: "America/Los_Angeles",
+            metadata: .feeding(activeNursing),
+            source: .manual,
+            createdBy: userId,
+            updatedBy: userId,
+            createdAt: t0,
+            updatedAt: segStart
+        )
+        let decodedEvent = try decoder.decode(EventDTO.self, from: encoder.encode(event))
+        #expect(decodedEvent == event)
+        #expect(decodedEvent.isOpenLiveTimer == true)
+
+        // Paused live nursing (isTimerActive == true, activeSide/activeSegmentStartedAt == nil) round-trips cleanly.
+        let pausedNursing = FeedingMetadata(
+            method: .breast,
+            substance: .breastMilk,
+            side: .left,
+            leftDurationSeconds: 240,
+            lastSide: .left,
+            isTimerActive: true,
+            activeSide: nil,
+            activeSegmentStartedAt: nil
+        )
+        let pausedData = try encoder.encode(pausedNursing)
+        let pausedJSON = try #require(String(data: pausedData, encoding: .utf8))
+        #expect(pausedJSON.contains("\"is_timer_active\":true"))
+        #expect(!pausedJSON.contains("\"active_side\""))
+        #expect(!pausedJSON.contains("\"active_segment_started_at\""))
+        #expect(try decoder.decode(FeedingMetadata.self, from: pausedData) == pausedNursing)
+
+        // Legacy JSON without new live-timer keys decodes cleanly with nil defaults.
+        let legacyNursingJSON = """
+        {
+          "method": "breast",
+          "substance": "breast_milk",
+          "display_unit": "oz",
+          "side": "both",
+          "duration_minutes": 14,
+          "left_duration_seconds": 420,
+          "right_duration_seconds": 420,
+          "last_side": "right"
+        }
+        """
+        let decodedLegacy = try decoder.decode(FeedingMetadata.self, from: Data(legacyNursingJSON.utf8))
+        #expect(decodedLegacy.method == .breast)
+        #expect(decodedLegacy.side == .both)
+        #expect(decodedLegacy.lastSide == .right)
+        #expect(decodedLegacy.isTimerActive == nil)
+        #expect(decodedLegacy.activeSide == nil)
+        #expect(decodedLegacy.activeSegmentStartedAt == nil)
+
+        // Encoding without live-timer fields omits all 3 optional keys, and convenience oz init defaults them to nil.
+        let bottle = FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: 3.5)
+        #expect(bottle.isTimerActive == nil)
+        #expect(bottle.activeSide == nil)
+        #expect(bottle.activeSegmentStartedAt == nil)
+        let bottleJSON = try #require(String(data: encoder.encode(bottle), encoding: .utf8))
+        #expect(!bottleJSON.contains("\"is_timer_active\""))
+        #expect(!bottleJSON.contains("\"active_side\""))
+        #expect(!bottleJSON.contains("\"active_segment_started_at\""))
+    }
+
+    @Test("Live pump PumpMetadata timer fields round-trip as snake_case JSON, discriminate cleanly, and stay backward-compatible")
+    func pumpMetadataLiveTimerRoundTripDiscriminationAndLegacyCompatibility() throws {
+        let t0 = fixedDate("2026-11-27T19:00:00.000Z")
+        let leftStart = fixedDate("2026-11-27T19:00:10.000Z")
+        let rightStart = fixedDate("2026-11-27T19:02:15.500Z")
+        let sessionStart = fixedDate("2026-11-27T19:00:10.000Z")
+
+        let activePump = PumpMetadata(
+            amountMl: nil,
+            displayUnit: .oz,
+            side: .both,
+            durationMinutes: nil,
+            leftAmountMl: nil,
+            rightAmountMl: nil,
+            leftDurationSeconds: 120,
+            rightDurationSeconds: 60,
+            isTimerActive: true,
+            leftSegmentStartedAt: leftStart,
+            rightSegmentStartedAt: rightStart,
+            sessionAccumulatedSeconds: 185,
+            sessionSegmentStartedAt: sessionStart
+        )
+
+        let data = try encoder.encode(activePump)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"is_timer_active\":true"))
+        #expect(json.contains("\"left_segment_started_at\":\"2026-11-27T19:00:10.000Z\""))
+        #expect(json.contains("\"right_segment_started_at\":\"2026-11-27T19:02:15.500Z\""))
+        #expect(json.contains("\"session_accumulated_seconds\":185"))
+        #expect(json.contains("\"session_segment_started_at\":\"2026-11-27T19:00:10.000Z\""))
+
+        let decoded = try decoder.decode(PumpMetadata.self, from: data)
+        #expect(decoded == activePump)
+        #expect(decoded.isTimerActive == true)
+        #expect(decoded.leftSegmentStartedAt == leftStart)
+        #expect(decoded.rightSegmentStartedAt == rightStart)
+        #expect(decoded.sessionAccumulatedSeconds == 185)
+        #expect(decoded.sessionSegmentStartedAt == sessionStart)
+
+        // Standalone EventMetadata decoding preserves all live pump fields.
+        let standalone = try decoder.decode(EventMetadata.self, from: data)
+        #expect(standalone == .pump(activePump))
+
+        // Full EventDTO round-trip preserves live pump fields and reports isOpenLiveTimer == true.
+        let userId = UUID()
+        let event = EventDTO(
+            profileId: UUID(),
+            eventType: .pump,
+            startedAt: t0,
+            endedAt: nil,
+            timezone: "America/Los_Angeles",
+            metadata: .pump(activePump),
+            source: .manual,
+            createdBy: userId,
+            updatedBy: userId,
+            createdAt: t0,
+            updatedAt: rightStart
+        )
+        let decodedEvent = try decoder.decode(EventDTO.self, from: encoder.encode(event))
+        #expect(decodedEvent == event)
+        #expect(decodedEvent.isOpenLiveTimer == true)
+
+        // Standalone EventMetadata routes each pump-specific live-timer key to .pump even when `side` is omitted.
+        let leftSegOnly = try decoder.decode(
+            EventMetadata.self,
+            from: Data(#"{"left_segment_started_at":"2026-11-27T19:00:10.000Z"}"#.utf8)
+        )
+        #expect(leftSegOnly == .pump(PumpMetadata(leftSegmentStartedAt: leftStart)))
+
+        let rightSegOnly = try decoder.decode(
+            EventMetadata.self,
+            from: Data(#"{"right_segment_started_at":"2026-11-27T19:02:15.500Z"}"#.utf8)
+        )
+        #expect(rightSegOnly == .pump(PumpMetadata(rightSegmentStartedAt: rightStart)))
+
+        let sessionAccOnly = try decoder.decode(
+            EventMetadata.self,
+            from: Data(#"{"session_accumulated_seconds":185}"#.utf8)
+        )
+        #expect(sessionAccOnly == .pump(PumpMetadata(sessionAccumulatedSeconds: 185)))
+
+        let sessionSegOnly = try decoder.decode(
+            EventMetadata.self,
+            from: Data(#"{"session_segment_started_at":"2026-11-27T19:00:10.000Z"}"#.utf8)
+        )
+        #expect(sessionSegOnly == .pump(PumpMetadata(sessionSegmentStartedAt: sessionStart)))
+
+        // `is_timer_active` alone must NOT route ambiguously to .feeding or .pump.
+        let ambiguousTimerOnly = try decoder.decode(
+            EventMetadata.self,
+            from: Data(#"{"is_timer_active":true}"#.utf8)
+        )
+        #expect(ambiguousTimerOnly == .note(NoteMetadata()))
+
+        // Legacy pump JSON omitting all 5 new live-timer keys decodes cleanly with nil defaults.
+        let legacyPumpJSON = Data(
+            #"{"amount_ml":133.1,"display_unit":"oz","side":"both","duration_minutes":15,"left_amount_ml":59.1,"right_amount_ml":73.9,"left_duration_seconds":420,"right_duration_seconds":480}"#.utf8
+        )
+        let decodedLegacy = try decoder.decode(PumpMetadata.self, from: legacyPumpJSON)
+        #expect(decodedLegacy.amountMl == 133.1)
+        #expect(decodedLegacy.leftDurationSeconds == 420)
+        #expect(decodedLegacy.rightDurationSeconds == 480)
+        #expect(decodedLegacy.isTimerActive == nil)
+        #expect(decodedLegacy.leftSegmentStartedAt == nil)
+        #expect(decodedLegacy.rightSegmentStartedAt == nil)
+        #expect(decodedLegacy.sessionAccumulatedSeconds == nil)
+        #expect(decodedLegacy.sessionSegmentStartedAt == nil)
+
+        // Convenience oz initializer defaults live-timer fields to nil and omits them from JSON.
+        let manualOzPump = PumpMetadata(amountOz: 4.5, side: .both)
+        #expect(manualOzPump.isTimerActive == nil)
+        #expect(manualOzPump.leftSegmentStartedAt == nil)
+        #expect(manualOzPump.rightSegmentStartedAt == nil)
+        #expect(manualOzPump.sessionAccumulatedSeconds == nil)
+        #expect(manualOzPump.sessionSegmentStartedAt == nil)
+        let manualPumpJSON = try #require(String(data: encoder.encode(manualOzPump), encoding: .utf8))
+        #expect(!manualPumpJSON.contains("\"is_timer_active\""))
+        #expect(!manualPumpJSON.contains("\"left_segment_started_at\""))
+        #expect(!manualPumpJSON.contains("\"right_segment_started_at\""))
+        #expect(!manualPumpJSON.contains("\"session_accumulated_seconds\""))
+        #expect(!manualPumpJSON.contains("\"session_segment_started_at\""))
+    }
+
+    @Test("EventDTO.isOpenLiveTimer truth table across sleep, nursing, pump, and non-timer events")
+    func eventDTOIsOpenLiveTimerTruthTable() {
+        let profileId = UUID()
+        let userId = UUID()
+        let t0 = fixedDate("2026-11-27T18:00:00.000Z")
+        let t1 = fixedDate("2026-11-27T18:45:00.000Z")
+
+        func makeEvent(
+            type: EventType,
+            endedAt: Date? = nil,
+            deletedAt: Date? = nil,
+            metadata: EventMetadata
+        ) -> EventDTO {
+            EventDTO(
+                profileId: profileId,
+                eventType: type,
+                startedAt: t0,
+                endedAt: endedAt,
+                timezone: "America/Los_Angeles",
+                metadata: metadata,
+                source: .manual,
+                createdBy: userId,
+                updatedBy: userId,
+                createdAt: t0,
+                updatedAt: t0,
+                deletedAt: deletedAt
+            )
+        }
+
+        // Sleep: open -> true; ended -> false; deleted -> false
+        #expect(makeEvent(type: .sleep, metadata: .sleep(SleepMetadata(sleepType: .nap))).isOpenLiveTimer == true)
+        #expect(makeEvent(type: .sleep, metadata: .sleep(SleepMetadata(sleepType: .night))).isOpenLiveTimer == true)
+        #expect(makeEvent(type: .sleep, endedAt: t1, metadata: .sleep(SleepMetadata(sleepType: .nap))).isOpenLiveTimer == false)
+        #expect(makeEvent(type: .sleep, deletedAt: t1, metadata: .sleep(SleepMetadata(sleepType: .nap))).isOpenLiveTimer == false)
+
+        // Nursing: open live timer -> true; completed / deleted / manual without isTimerActive == true -> false
+        #expect(
+            makeEvent(
+                type: .feeding,
+                metadata: .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        isTimerActive: true,
+                        activeSide: .left,
+                        activeSegmentStartedAt: t0
+                    )
+                )
+            ).isOpenLiveTimer == true
+        )
+        #expect(
+            makeEvent(
+                type: .feeding,
+                endedAt: t1,
+                metadata: .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        isTimerActive: true
+                    )
+                )
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .feeding,
+                deletedAt: t1,
+                metadata: .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        isTimerActive: true
+                    )
+                )
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .feeding,
+                metadata: .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        side: .left,
+                        durationMinutes: 10
+                    )
+                )
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .feeding,
+                metadata: .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        isTimerActive: false
+                    )
+                )
+            ).isOpenLiveTimer == false
+        )
+
+        // Pump: open live timer -> true; manual volume-only with endedAt == nil -> false; completed / deleted -> false
+        #expect(
+            makeEvent(
+                type: .pump,
+                metadata: .pump(
+                    PumpMetadata(
+                        side: .both,
+                        isTimerActive: true,
+                        sessionSegmentStartedAt: t0
+                    )
+                )
+            ).isOpenLiveTimer == true
+        )
+        #expect(
+            makeEvent(
+                type: .pump,
+                endedAt: nil,
+                metadata: .pump(PumpMetadata(amountOz: 4.5, side: .both))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .pump,
+                endedAt: nil,
+                metadata: .pump(PumpMetadata(side: .both, isTimerActive: false))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .pump,
+                endedAt: t1,
+                metadata: .pump(PumpMetadata(amountOz: 4.5, side: .both, isTimerActive: true))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .pump,
+                deletedAt: t1,
+                metadata: .pump(PumpMetadata(side: .both, isTimerActive: true))
+            ).isOpenLiveTimer == false
+        )
+
+        // Bottle, diaper, meal, bath, medicine, note -> always false
+        #expect(
+            makeEvent(
+                type: .feeding,
+                metadata: .feeding(FeedingMetadata(method: .bottle, substance: .breastMilk, amountOz: 4.0))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .feeding,
+                metadata: .feeding(FeedingMetadata(method: .bottle, substance: .breastMilk, isTimerActive: true))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .diaper,
+                metadata: .diaper(DiaperMetadata(peeSize: .medium))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .meal,
+                metadata: .meal(MealMetadata(mealSlot: .lunch, portionEaten: .most))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .bath,
+                metadata: .bath(BathMetadata(washedHair: true))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .medicine,
+                metadata: .medicine(MedicineMetadata(name: "Vitamin D", category: .supplement, dose: 1, unit: .drops))
+            ).isOpenLiveTimer == false
+        )
+        #expect(
+            makeEvent(
+                type: .note,
+                metadata: .note(NoteMetadata())
+            ).isOpenLiveTimer == false
+        )
+    }
 }
 
 @Suite("UnitConversion")

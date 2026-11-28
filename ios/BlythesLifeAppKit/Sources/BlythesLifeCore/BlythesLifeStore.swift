@@ -224,6 +224,31 @@ public struct RhythmNursingSpan: Identifiable, Sendable, Equatable {
     }
 }
 
+public struct RhythmPumpMark: Identifiable, Sendable, Equatable {
+    public var id: String
+    public var minute: Double
+    public var amountOz: Double
+    public var amountMl: Double
+    public var durationMinutes: Double?
+    public var isLive: Bool
+
+    public init(
+        id: String,
+        minute: Double,
+        amountOz: Double,
+        amountMl: Double,
+        durationMinutes: Double? = nil,
+        isLive: Bool = false
+    ) {
+        self.id = id
+        self.minute = minute
+        self.amountOz = amountOz
+        self.amountMl = amountMl
+        self.durationMinutes = durationMinutes
+        self.isLive = isLive
+    }
+}
+
 public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
     public var id: String
     public var date: Date
@@ -235,6 +260,7 @@ public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
     public var sleepSpans: [RhythmSleepSpan]
     public var bottleMarks: [RhythmBottleMark]
     public var nursingSpans: [RhythmNursingSpan]
+    public var pumpMarks: [RhythmPumpMark]
     public var mealMinutes: [Double]
     public var diaperMinutes: [Double]
 
@@ -249,6 +275,7 @@ public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
         sleepSpans: [RhythmSleepSpan],
         bottleMarks: [RhythmBottleMark],
         nursingSpans: [RhythmNursingSpan],
+        pumpMarks: [RhythmPumpMark] = [],
         mealMinutes: [Double],
         diaperMinutes: [Double]
     ) {
@@ -262,6 +289,7 @@ public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
         self.sleepSpans = sleepSpans
         self.bottleMarks = bottleMarks
         self.nursingSpans = nursingSpans
+        self.pumpMarks = pumpMarks
         self.mealMinutes = mealMinutes
         self.diaperMinutes = diaperMinutes
     }
@@ -284,8 +312,19 @@ public struct RhythmDaySummary: Identifiable, Sendable, Equatable {
         return (sum * 10.0).rounded() / 10.0
     }
 
+    public var totalPumpedOz: Double {
+        let sum = pumpMarks.reduce(0) { $0 + $1.amountOz }
+        return (sum * 100.0).rounded() / 100.0
+    }
+
+    public var totalPumpedMl: Double {
+        let sum = pumpMarks.reduce(0) { $0 + $1.amountMl }
+        return (sum * 10.0).rounded() / 10.0
+    }
+
     public var bottleCount: Int { bottleMarks.count }
     public var nursingCount: Int { nursingSpans.count }
+    public var pumpCount: Int { pumpMarks.count }
     public var mealCount: Int { mealMinutes.count }
     public var diaperCount: Int { diaperMinutes.count }
 }
@@ -307,6 +346,8 @@ public final class BlythesLifeStore {
     public var scannedSheets: [ScannedSheetRecord]
     public var preferredUnit: VolumeUnit
     public var colorModePreference: AppColorModePreference
+    public var pumpNotificationSettings: PumpNotificationSettings
+    public var pumpNotificationAuthStatus: PumpNotificationAuthorizationStatus
     public var postureOverride: PosturePreviewOverride
     public var now: Date
     public var toast: ToastState?
@@ -360,6 +401,7 @@ public final class BlythesLifeStore {
     @ObservationIgnored private let storage: any LocalStateStorage
     @ObservationIgnored private let apiClient: (any BackendAPIProviding)?
     @ObservationIgnored private let tokenStore: any AuthTokenStorage
+    @ObservationIgnored private let notificationScheduler: any PumpNotificationScheduling
     @ObservationIgnored private var accessToken: String?
     @ObservationIgnored private var refreshToken: String?
     @ObservationIgnored private var inFlightRefreshTask: Task<String, Error>?
@@ -367,6 +409,7 @@ public final class BlythesLifeStore {
     @ObservationIgnored private var clockTask: Task<Void, Never>?
     @ObservationIgnored private var toastDismissTask: Task<Void, Never>?
     @ObservationIgnored private var sseTask: Task<Void, Never>?
+    @ObservationIgnored private var notificationSyncTask: Task<Void, Never>?
     @ObservationIgnored private var lastPersistError: String?
 
     public init(
@@ -377,11 +420,13 @@ public final class BlythesLifeStore {
         refreshToken: String? = nil,
         seedReferenceDate: Date = SampleSeedData.defaultReferenceDate,
         initialNow: Date? = nil,
-        autoStartClock: Bool = false
+        autoStartClock: Bool = false,
+        notificationScheduler: any PumpNotificationScheduling = UserNotificationPumpScheduler()
     ) {
         self.storage = storage
         self.apiClient = apiClient
         self.tokenStore = tokenStore
+        self.notificationScheduler = notificationScheduler
         self.isProcessingScan = false
         self.isAuthenticating = false
         self.lastSyncError = nil
@@ -488,8 +533,12 @@ public final class BlythesLifeStore {
         self.serverWatermark = loadedState.serverWatermark
         self.preferredUnit = loadedState.preferredUnit
         self.colorModePreference = loadedState.colorMode
+        self.pumpNotificationSettings = loadedState.pumpNotificationSettings
+        self.pumpNotificationAuthStatus = .notDetermined
         self.authEmail = loadedState.authEmail
         self.displayName = loadedState.displayName
+
+        reconcileActiveTimersFromEvents()
 
         if autoStartClock {
             startClock()
@@ -502,7 +551,8 @@ public final class BlythesLifeStore {
         apiClient: (any BackendAPIProviding)? = nil,
         tokenStore: any AuthTokenStorage = InMemoryAuthTokenStorage(),
         accessToken: String? = nil,
-        refreshToken: String? = nil
+        refreshToken: String? = nil,
+        notificationScheduler: any PumpNotificationScheduling = NoopPumpNotificationScheduler()
     ) -> BlythesLifeStore {
         let seed = SampleSeedData.makeDemoState(referenceDate: referenceDate)
         let memory = InMemoryLocalStateStorage(initialState: seed)
@@ -514,7 +564,8 @@ public final class BlythesLifeStore {
             refreshToken: refreshToken,
             seedReferenceDate: referenceDate,
             initialNow: referenceDate,
-            autoStartClock: false
+            autoStartClock: false,
+            notificationScheduler: notificationScheduler
         )
     }
 
@@ -624,12 +675,12 @@ public final class BlythesLifeStore {
     // MARK: - Today Computed Views
 
     /// Non-deleted completed events belonging to today's local calendar day, sorted newest first.
-    /// Open-ended active sleep timers (`endedAt == nil`) are represented by the hero `NapCard` until completed.
+    /// Open-ended live timers (`isOpenLiveTimer`) are represented by live timer cards/banners until completed.
     public var todayEvents: [EventDTO] {
         let calendar = profileCalendar
         return activeEvents
             .filter { event in
-                if event.eventType == .sleep && event.endedAt == nil {
+                if event.isOpenLiveTimer {
                     return false
                 }
                 if case .sleep(let meta) = event.metadata, meta.sleepType == .night, let endedAt = event.endedAt {
@@ -947,11 +998,12 @@ public final class BlythesLifeStore {
         )
     }
 
-    /// Most recent nursing session's ending side (`.left` or `.right`) across all history so overnight feeds remember yesterday's last side.
+    /// Most recent completed nursing session's ending side (`.left` or `.right`) across all history so overnight feeds remember yesterday's last side.
     public var lastNursingSideInfo: LastNursingSideInfo? {
         let latestNursing = activeEvents
             .filter { event in
-                guard event.eventType == .feeding,
+                guard !event.isOpenLiveTimer,
+                      event.eventType == .feeding,
                       case .feeding(let meta) = event.metadata,
                       meta.method == .breast
                 else {
@@ -1234,10 +1286,12 @@ public final class BlythesLifeStore {
             var sleepSpans: [RhythmSleepSpan] = []
             var bottleMarks: [RhythmBottleMark] = []
             var nursingSpans: [RhythmNursingSpan] = []
+            var pumpMarks: [RhythmPumpMark] = []
             var mealMinutes: [Double] = []
             var diaperMinutes: [Double] = []
 
             for event in nonDeleted {
+                guard !event.isOpenLiveTimer else { continue }
                 switch event.metadata {
                 case .sleep(let meta):
                     // Open-ended active sleep events are rendered once via `activeNapStart` below so they are never double-counted.
@@ -1323,6 +1377,22 @@ public final class BlythesLifeStore {
                         )
                     }
 
+                case .pump(let meta):
+                    guard event.startedAt >= dayStart && event.startedAt < dayEnd else { continue }
+                    let minute = event.startedAt.timeIntervalSince(dayStart) / 60.0
+                    let ml = meta.amountMl ?? ((meta.leftAmountMl ?? 0) + (meta.rightAmountMl ?? 0))
+                    let oz = UnitConversion.mlToOz(ml)
+                    pumpMarks.append(
+                        RhythmPumpMark(
+                            id: event.id.uuidString,
+                            minute: minute,
+                            amountOz: oz,
+                            amountMl: ml,
+                            durationMinutes: meta.durationMinutes,
+                            isLive: false
+                        )
+                    )
+
                 case .meal:
                     guard event.startedAt >= dayStart && event.startedAt < dayEnd else { continue }
                     mealMinutes.append(event.startedAt.timeIntervalSince(dayStart) / 60.0)
@@ -1331,7 +1401,7 @@ public final class BlythesLifeStore {
                     guard event.startedAt >= dayStart && event.startedAt < dayEnd else { continue }
                     diaperMinutes.append(event.startedAt.timeIntervalSince(dayStart) / 60.0)
 
-                case .pump, .bath, .medicine, .note:
+                case .bath, .medicine, .note:
                     break
                 }
             }
@@ -1374,9 +1444,28 @@ public final class BlythesLifeStore {
                 }
             }
 
+            // Include live active pump mark on today's column
+            if isToday, let pump = activePump, now >= pump.startedAt {
+                let clippedStart = max(pump.startedAt, dayStart)
+                let minute = min(1440.0, max(0.0, clippedStart.timeIntervalSince(dayStart) / 60.0))
+                let elapsed = pump.elapsedSeconds(asOf: now)
+                let liveDuration = max(1.0, elapsed.session / 60.0)
+                pumpMarks.append(
+                    RhythmPumpMark(
+                        id: "live-pump",
+                        minute: minute,
+                        amountOz: 0,
+                        amountMl: 0,
+                        durationMinutes: liveDuration,
+                        isLive: true
+                    )
+                )
+            }
+
             sleepSpans.sort { $0.startMinute < $1.startMinute }
             bottleMarks.sort { $0.minute < $1.minute }
             nursingSpans.sort { $0.startMinute < $1.startMinute }
+            pumpMarks.sort { $0.minute < $1.minute }
             mealMinutes.sort()
             diaperMinutes.sort()
 
@@ -1396,6 +1485,7 @@ public final class BlythesLifeStore {
                     sleepSpans: sleepSpans,
                     bottleMarks: bottleMarks,
                     nursingSpans: nursingSpans,
+                    pumpMarks: pumpMarks,
                     mealMinutes: mealMinutes,
                     diaperMinutes: diaperMinutes
                 )
@@ -1409,6 +1499,20 @@ public final class BlythesLifeStore {
         let days = rhythmWeekDays
         guard let first = days.first, let last = days.last else { return "" }
         return FormattingHelpers.formatWeekRange(start: first.date, end: last.date, timeZone: profileTimeZone)
+    }
+
+    public var rhythmWeekTotalPumpedOz: Double {
+        let sum = rhythmWeekDays.reduce(0) { $0 + $1.totalPumpedOz }
+        return (sum * 100.0).rounded() / 100.0
+    }
+
+    public var rhythmWeekTotalPumpedMl: Double {
+        let sum = rhythmWeekDays.reduce(0) { $0 + $1.totalPumpedMl }
+        return (sum * 10.0).rounded() / 10.0
+    }
+
+    public var rhythmWeekPumpCount: Int {
+        rhythmWeekDays.reduce(0) { $0 + $1.pumpCount }
     }
 
     // MARK: - Sleep & Nap Actions (Multi-Device Live Sync)
@@ -1616,12 +1720,32 @@ public final class BlythesLifeStore {
         return event
     }
 
-    // MARK: - Nursing Actions
+    // MARK: - Nursing Actions (Multi-Device Live Sync)
 
     public func tapNursingSide(_ side: BreastSide) {
         let targetSide: BreastSide = (side == .right) ? .right : .left
         guard let session = activeNursing else {
+            let openEvent = makeEvent(
+                type: .feeding,
+                startedAt: now,
+                endedAt: nil,
+                metadata: .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        displayUnit: preferredUnit,
+                        side: targetSide,
+                        leftDurationSeconds: 0,
+                        rightDurationSeconds: 0,
+                        lastSide: targetSide,
+                        isTimerActive: true,
+                        activeSide: targetSide,
+                        activeSegmentStartedAt: now
+                    )
+                )
+            )
             activeNursing = ActiveNursingSession(
+                eventId: openEvent.id,
                 startedAt: now,
                 leftAccumulatedSeconds: 0,
                 rightAccumulatedSeconds: 0,
@@ -1629,31 +1753,93 @@ public final class BlythesLifeStore {
                 activeSegmentStartedAt: now,
                 lastActiveSide: targetSide
             )
-            persistState()
+            appendEvents([openEvent])
             return
         }
 
         let elapsed = session.elapsedSeconds(asOf: now)
+        let nextActiveSide: BreastSide?
+        let nextActiveSegmentStartedAt: Date?
+        let nextLastSide: BreastSide?
         if session.activeSide == targetSide {
-            activeNursing = ActiveNursingSession(
-                startedAt: session.startedAt,
-                leftAccumulatedSeconds: elapsed.left,
-                rightAccumulatedSeconds: elapsed.right,
-                activeSide: nil,
-                activeSegmentStartedAt: nil,
-                lastActiveSide: session.lastActiveSide ?? targetSide
-            )
+            nextActiveSide = nil
+            nextActiveSegmentStartedAt = nil
+            nextLastSide = session.lastActiveSide ?? targetSide
         } else {
-            activeNursing = ActiveNursingSession(
-                startedAt: session.startedAt,
-                leftAccumulatedSeconds: elapsed.left,
-                rightAccumulatedSeconds: elapsed.right,
-                activeSide: targetSide,
-                activeSegmentStartedAt: now,
-                lastActiveSide: targetSide
-            )
+            nextActiveSide = targetSide
+            nextActiveSegmentStartedAt = now
+            nextLastSide = targetSide
         }
+
+        let resolvedLastSide: BreastSide? = (nextLastSide == .left || nextLastSide == .right) ? nextLastSide : nil
+        let resolvedSide = derivedNursingSide(
+            leftSeconds: elapsed.left,
+            rightSeconds: elapsed.right,
+            activeSide: nextActiveSide,
+            lastSide: resolvedLastSide
+        )
+
+        let liveMeta = FeedingMetadata(
+            method: .breast,
+            substance: .breastMilk,
+            amountMl: nil,
+            displayUnit: preferredUnit,
+            side: resolvedSide,
+            durationMinutes: nil,
+            leftDurationSeconds: Int(elapsed.left.rounded()),
+            rightDurationSeconds: Int(elapsed.right.rounded()),
+            lastSide: resolvedLastSide,
+            isTimerActive: true,
+            activeSide: nextActiveSide,
+            activeSegmentStartedAt: nextActiveSegmentStartedAt
+        )
+
+        let backingEventId: UUID
+        if let existingId = session.eventId,
+           let idx = events.firstIndex(where: { $0.id == existingId && $0.deletedAt == nil })
+        {
+            var updated = events[idx]
+            updated.startedAt = session.startedAt
+            updated.endedAt = nil
+            updated.metadata = .feeding(liveMeta)
+            updated.updatedAt = now
+            updated.updatedBy = currentUserId
+            events[idx] = updated
+            backingEventId = updated.id
+            enqueueEventOutbox(updated, operation: .upsert)
+        } else if let idx = latestOpenNursingEventIndex() {
+            var updated = events[idx]
+            updated.startedAt = session.startedAt
+            updated.endedAt = nil
+            updated.metadata = .feeding(liveMeta)
+            updated.updatedAt = now
+            updated.updatedBy = currentUserId
+            events[idx] = updated
+            backingEventId = updated.id
+            enqueueEventOutbox(updated, operation: .upsert)
+        } else {
+            let openEvent = makeEvent(
+                type: .feeding,
+                startedAt: session.startedAt,
+                endedAt: nil,
+                metadata: .feeding(liveMeta)
+            )
+            events.append(openEvent)
+            backingEventId = openEvent.id
+            enqueueEventOutbox(openEvent, operation: .upsert)
+        }
+
+        activeNursing = ActiveNursingSession(
+            eventId: backingEventId,
+            startedAt: session.startedAt,
+            leftAccumulatedSeconds: elapsed.left,
+            rightAccumulatedSeconds: elapsed.right,
+            activeSide: nextActiveSide,
+            activeSegmentStartedAt: nextActiveSegmentStartedAt,
+            lastActiveSide: resolvedLastSide ?? nextLastSide
+        )
         persistState()
+        triggerBackgroundFlush()
     }
 
     @discardableResult
@@ -1670,7 +1856,98 @@ public final class BlythesLifeStore {
         let rawLastSide = session.lastActiveSide ?? session.activeSide ?? (side == .both ? nil : side)
         let resolvedLastSide: BreastSide? = (rawLastSide == .left || rawLastSide == .right) ? rawLastSide : nil
 
+        let leftSec = Int(elapsed.left.rounded())
+        let rightSec = Int(elapsed.right.rounded())
+        let leftMinutes = max(1, Int((elapsed.left / 60.0).rounded()))
+        let rightMinutes = max(1, Int((elapsed.right / 60.0).rounded()))
+        let totalMinutes = both ? (leftMinutes + rightMinutes) : max(1, Int((elapsed.total / 60.0).rounded()))
+
+        let completedMetadata = FeedingMetadata(
+            method: .breast,
+            substance: .breastMilk,
+            amountMl: nil,
+            displayUnit: preferredUnit,
+            side: side,
+            durationMinutes: Double(totalMinutes),
+            leftDurationSeconds: leftSec,
+            rightDurationSeconds: rightSec,
+            lastSide: resolvedLastSide,
+            isTimerActive: nil,
+            activeSide: nil,
+            activeSegmentStartedAt: nil
+        )
+
+        let backingIndex: Int? = {
+            if let eventId = session.eventId,
+               let idx = events.firstIndex(where: { $0.id == eventId })
+            {
+                return idx
+            }
+            return latestOpenNursingEventIndex()
+        }()
+
+        if let openIndex = backingIndex {
+            var completed = events[openIndex]
+            completed.startedAt = session.startedAt
+            completed.endedAt = max(now, session.startedAt)
+            completed.deletedAt = nil
+            completed.metadata = .feeding(completedMetadata)
+            completed.updatedAt = now
+            completed.updatedBy = currentUserId
+            events[openIndex] = completed
+
+            let pausedBackup = ActiveNursingSession(
+                eventId: completed.id,
+                startedAt: session.startedAt,
+                leftAccumulatedSeconds: elapsed.left,
+                rightAccumulatedSeconds: elapsed.right,
+                activeSide: nil,
+                activeSegmentStartedAt: nil,
+                lastActiveSide: resolvedLastSide
+            )
+
+            activeNursing = nil
+            enqueueEventOutbox(completed, operation: .upsert)
+            persistState()
+            triggerBackgroundFlush()
+
+            showToast("Nursing logged · \(totalMinutes)m") { [weak self] in
+                guard let self else { return }
+                if let idx = self.events.firstIndex(where: { $0.id == completed.id }) {
+                    var reopened = completed
+                    reopened.endedAt = nil
+                    reopened.deletedAt = nil
+                    reopened.metadata = .feeding(
+                        FeedingMetadata(
+                            method: .breast,
+                            substance: .breastMilk,
+                            amountMl: nil,
+                            displayUnit: self.preferredUnit,
+                            side: side,
+                            durationMinutes: nil,
+                            leftDurationSeconds: leftSec,
+                            rightDurationSeconds: rightSec,
+                            lastSide: resolvedLastSide,
+                            isTimerActive: true,
+                            activeSide: nil,
+                            activeSegmentStartedAt: nil
+                        )
+                    )
+                    reopened.updatedAt = self.now
+                    reopened.updatedBy = self.currentUserId
+                    self.events[idx] = reopened
+                    self.enqueueEventOutbox(reopened, operation: .upsert)
+                }
+                self.activeNursing = pausedBackup
+                self.persistState()
+                self.triggerBackgroundFlush()
+            }
+            return completed
+        }
+
+        // Legacy fallback when `activeNursing` existed without a backing open-ended event
         let pausedBackup = ActiveNursingSession(
+            eventId: nil,
             startedAt: session.startedAt,
             leftAccumulatedSeconds: elapsed.left,
             rightAccumulatedSeconds: elapsed.right,
@@ -1678,28 +1955,11 @@ public final class BlythesLifeStore {
             activeSegmentStartedAt: nil,
             lastActiveSide: resolvedLastSide
         )
-
-        let leftMinutes = max(1, Int((elapsed.left / 60.0).rounded()))
-        let rightMinutes = max(1, Int((elapsed.right / 60.0).rounded()))
-        let totalMinutes = both ? (leftMinutes + rightMinutes) : max(1, Int((elapsed.total / 60.0).rounded()))
-
         let event = makeEvent(
             type: .feeding,
             startedAt: session.startedAt,
             endedAt: max(now, session.startedAt),
-            metadata: .feeding(
-                FeedingMetadata(
-                    method: .breast,
-                    substance: .breastMilk,
-                    amountMl: nil,
-                    displayUnit: preferredUnit,
-                    side: side,
-                    durationMinutes: Double(totalMinutes),
-                    leftDurationSeconds: Int(elapsed.left.rounded()),
-                    rightDurationSeconds: Int(elapsed.right.rounded()),
-                    lastSide: resolvedLastSide
-                )
-            )
+            metadata: .feeding(completedMetadata)
         )
 
         activeNursing = nil
@@ -1716,20 +1976,92 @@ public final class BlythesLifeStore {
     public func discardNursing() {
         guard let session = activeNursing else { return }
         let elapsed = session.elapsedSeconds(asOf: now)
+        let rawLastSide = session.lastActiveSide ?? session.activeSide
+        let resolvedLastSide: BreastSide? = (rawLastSide == .left || rawLastSide == .right) ? rawLastSide : nil
+        let leftSec = Int(elapsed.left.rounded())
+        let rightSec = Int(elapsed.right.rounded())
+        let resolvedSide = derivedNursingSide(
+            leftSeconds: elapsed.left,
+            rightSeconds: elapsed.right,
+            activeSide: nil,
+            lastSide: resolvedLastSide
+        )
+
+        let backingIndex: Int? = {
+            if let eventId = session.eventId,
+               let idx = events.firstIndex(where: { $0.id == eventId })
+            {
+                return idx
+            }
+            return latestOpenNursingEventIndex()
+        }()
+        let backedSnapshot = backingIndex.map { events[$0] }
+
         let pausedBackup = ActiveNursingSession(
+            eventId: backedSnapshot?.id ?? session.eventId,
             startedAt: session.startedAt,
             leftAccumulatedSeconds: elapsed.left,
             rightAccumulatedSeconds: elapsed.right,
             activeSide: nil,
             activeSegmentStartedAt: nil,
-            lastActiveSide: session.lastActiveSide ?? session.activeSide
+            lastActiveSide: resolvedLastSide ?? rawLastSide
         )
+
         activeNursing = nil
-        persistState()
+
+        if let idx = backingIndex {
+            let targetId = events[idx].id
+            if hasLiveSession {
+                var softDeleted = events[idx]
+                softDeleted.deletedAt = now
+                softDeleted.updatedAt = now
+                softDeleted.updatedBy = currentUserId
+                events[idx] = softDeleted
+                enqueueEventOutbox(softDeleted, operation: .delete)
+                persistState()
+                triggerBackgroundFlush()
+            } else {
+                removeNewlyCreatedEvents(ids: [targetId])
+            }
+        } else {
+            persistState()
+        }
+
         showToast("Nursing timer discarded") { [weak self] in
             guard let self else { return }
+            if let snapshot = backedSnapshot {
+                var restored = snapshot
+                restored.startedAt = session.startedAt
+                restored.endedAt = nil
+                restored.deletedAt = nil
+                restored.metadata = .feeding(
+                    FeedingMetadata(
+                        method: .breast,
+                        substance: .breastMilk,
+                        amountMl: nil,
+                        displayUnit: self.preferredUnit,
+                        side: resolvedSide,
+                        durationMinutes: nil,
+                        leftDurationSeconds: leftSec,
+                        rightDurationSeconds: rightSec,
+                        lastSide: resolvedLastSide,
+                        isTimerActive: true,
+                        activeSide: nil,
+                        activeSegmentStartedAt: nil
+                    )
+                )
+                restored.updatedAt = self.now
+                restored.updatedBy = self.currentUserId
+                if let idx = self.events.firstIndex(where: { $0.id == restored.id }) {
+                    self.events[idx] = restored
+                } else {
+                    self.events.append(restored)
+                }
+                self.enqueueEventOutbox(restored, operation: .upsert)
+            }
             self.activeNursing = pausedBackup
             self.persistState()
+            self.triggerBackgroundFlush()
         }
     }
 
@@ -1826,12 +2158,13 @@ public final class BlythesLifeStore {
         return event
     }
 
-    // MARK: - Pump Timer Actions
+    // MARK: - Pump Timer Actions (Multi-Device Live Sync)
 
     public func tapPumpSide(_ side: BreastSide) {
         let targetIsRight = (side == .right)
         guard let session = activePump else {
-            activePump = ActivePumpSession(
+            var newSession = ActivePumpSession(
+                eventId: nil,
                 startedAt: now,
                 leftAccumulatedSeconds: 0,
                 rightAccumulatedSeconds: 0,
@@ -1840,7 +2173,16 @@ public final class BlythesLifeStore {
                 sessionAccumulatedSeconds: 0,
                 sessionSegmentStartedAt: now
             )
-            persistState()
+            let openEvent = makeEvent(
+                type: .pump,
+                startedAt: now,
+                endedAt: nil,
+                metadata: .pump(makeLivePumpMetadata(for: newSession, asOf: now))
+            )
+            newSession.eventId = openEvent.id
+            activePump = newSession
+            appendEvents([openEvent])
+            reschedulePumpNotifications()
             return
         }
 
@@ -1884,7 +2226,8 @@ public final class BlythesLifeStore {
             newSessionSeg = session.sessionSegmentStartedAt
         }
 
-        activePump = ActivePumpSession(
+        var updatedSession = ActivePumpSession(
+            eventId: session.eventId,
             startedAt: session.startedAt,
             leftAccumulatedSeconds: newLeftAccum,
             rightAccumulatedSeconds: newRightAccum,
@@ -1893,12 +2236,18 @@ public final class BlythesLifeStore {
             sessionAccumulatedSeconds: newSessionAccum,
             sessionSegmentStartedAt: newSessionSeg
         )
+        let backingEventId = upsertLivePumpEvent(for: updatedSession)
+        updatedSession.eventId = backingEventId
+        activePump = updatedSession
         persistState()
+        triggerBackgroundFlush()
+        reschedulePumpNotifications()
     }
 
     public func togglePumpBoth() {
         guard let session = activePump else {
-            activePump = ActivePumpSession(
+            var newSession = ActivePumpSession(
+                eventId: nil,
                 startedAt: now,
                 leftAccumulatedSeconds: 0,
                 rightAccumulatedSeconds: 0,
@@ -1907,14 +2256,25 @@ public final class BlythesLifeStore {
                 sessionAccumulatedSeconds: 0,
                 sessionSegmentStartedAt: now
             )
-            persistState()
+            let openEvent = makeEvent(
+                type: .pump,
+                startedAt: now,
+                endedAt: nil,
+                metadata: .pump(makeLivePumpMetadata(for: newSession, asOf: now))
+            )
+            newSession.eventId = openEvent.id
+            activePump = newSession
+            appendEvents([openEvent])
+            reschedulePumpNotifications()
             return
         }
 
+        var updatedSession: ActivePumpSession
         if session.isRunning {
             let elapsed = session.elapsedSeconds(asOf: now)
             let sessionDelta = max(0, now.timeIntervalSince(session.sessionSegmentStartedAt ?? session.startedAt))
-            activePump = ActivePumpSession(
+            updatedSession = ActivePumpSession(
+                eventId: session.eventId,
                 startedAt: session.startedAt,
                 leftAccumulatedSeconds: elapsed.left,
                 rightAccumulatedSeconds: elapsed.right,
@@ -1924,7 +2284,8 @@ public final class BlythesLifeStore {
                 sessionSegmentStartedAt: nil
             )
         } else {
-            activePump = ActivePumpSession(
+            updatedSession = ActivePumpSession(
+                eventId: session.eventId,
                 startedAt: session.startedAt,
                 leftAccumulatedSeconds: session.leftAccumulatedSeconds,
                 rightAccumulatedSeconds: session.rightAccumulatedSeconds,
@@ -1934,7 +2295,13 @@ public final class BlythesLifeStore {
                 sessionSegmentStartedAt: now
             )
         }
+
+        let backingEventId = upsertLivePumpEvent(for: updatedSession)
+        updatedSession.eventId = backingEventId
+        activePump = updatedSession
         persistState()
+        triggerBackgroundFlush()
+        reschedulePumpNotifications()
     }
 
     public func startOrTogglePumpTimer(side: BreastSide = .both) {
@@ -1956,15 +2323,6 @@ public final class BlythesLifeStore {
     ) -> EventDTO? {
         guard let session = activePump else { return nil }
         let elapsed = session.elapsedSeconds(asOf: now)
-        let pausedBackup = ActivePumpSession(
-            startedAt: session.startedAt,
-            leftAccumulatedSeconds: elapsed.left,
-            rightAccumulatedSeconds: elapsed.right,
-            leftSegmentStartedAt: nil,
-            rightSegmentStartedAt: nil,
-            sessionAccumulatedSeconds: elapsed.session,
-            sessionSegmentStartedAt: nil
-        )
         let sessionMinutes = max(1, Int((elapsed.session / 60.0).rounded()))
         let leftSec = elapsed.left > 0 ? max(1, Int(elapsed.left.rounded())) : nil
         let rightSec = elapsed.right > 0 ? max(1, Int(elapsed.right.rounded())) : nil
@@ -2011,27 +2369,22 @@ public final class BlythesLifeStore {
             return .both
         }()
 
-        let event = makeEvent(
-            type: .pump,
-            startedAt: session.startedAt,
-            endedAt: max(now, session.startedAt),
-            notes: trimmedNonEmpty(notes),
-            metadata: .pump(
-                PumpMetadata(
-                    amountMl: totalMl,
-                    displayUnit: effectiveUnit,
-                    side: effectiveSide,
-                    durationMinutes: Double(sessionMinutes),
-                    leftAmountMl: leftMl,
-                    rightAmountMl: rightMl,
-                    leftDurationSeconds: leftSec,
-                    rightDurationSeconds: rightSec
-                )
-            )
+        let completedMetadata = PumpMetadata(
+            amountMl: totalMl,
+            displayUnit: effectiveUnit,
+            side: effectiveSide,
+            durationMinutes: Double(sessionMinutes),
+            leftAmountMl: leftMl,
+            rightAmountMl: rightMl,
+            leftDurationSeconds: leftSec,
+            rightDurationSeconds: rightSec,
+            isTimerActive: nil,
+            leftSegmentStartedAt: nil,
+            rightSegmentStartedAt: nil,
+            sessionAccumulatedSeconds: nil,
+            sessionSegmentStartedAt: nil
         )
 
-        activePump = nil
-        appendEvents([event])
         let toastMessage: String
         if let displayTotal {
             let amountLabel = FormattingHelpers.formatAmount(displayTotal, unit: effectiveUnit)
@@ -2039,19 +2392,69 @@ public final class BlythesLifeStore {
         } else {
             toastMessage = "Pump logged · \(sessionMinutes)m"
         }
-        showToast(toastMessage) { [weak self] in
-            guard let self else { return }
-            self.removeNewlyCreatedEvents(ids: [event.id])
-            self.activePump = pausedBackup
-            self.persistState()
-        }
-        return event
-    }
 
-    public func discardPumpTimer() {
-        guard let session = activePump else { return }
-        let elapsed = session.elapsedSeconds(asOf: now)
+        let backingIndex: Int? = {
+            if let eventId = session.eventId,
+               let idx = events.firstIndex(where: { $0.id == eventId })
+            {
+                return idx
+            }
+            return latestOpenPumpEventIndex()
+        }()
+
+        if let openIndex = backingIndex {
+            let previousNotes = events[openIndex].notes
+            var completed = events[openIndex]
+            completed.startedAt = session.startedAt
+            completed.endedAt = max(now, session.startedAt)
+            completed.notes = trimmedNonEmpty(notes)
+            completed.deletedAt = nil
+            completed.metadata = .pump(completedMetadata)
+            completed.updatedAt = now
+            completed.updatedBy = currentUserId
+            events[openIndex] = completed
+
+            let pausedBackup = ActivePumpSession(
+                eventId: completed.id,
+                startedAt: session.startedAt,
+                leftAccumulatedSeconds: elapsed.left,
+                rightAccumulatedSeconds: elapsed.right,
+                leftSegmentStartedAt: nil,
+                rightSegmentStartedAt: nil,
+                sessionAccumulatedSeconds: elapsed.session,
+                sessionSegmentStartedAt: nil
+            )
+
+            activePump = nil
+            enqueueEventOutbox(completed, operation: .upsert)
+            persistState()
+            triggerBackgroundFlush()
+            reschedulePumpNotifications()
+
+            showToast(toastMessage) { [weak self] in
+                guard let self else { return }
+                if let idx = self.events.firstIndex(where: { $0.id == completed.id }) {
+                    var reopened = completed
+                    reopened.endedAt = nil
+                    reopened.deletedAt = nil
+                    reopened.notes = previousNotes
+                    reopened.metadata = .pump(self.makeLivePumpMetadata(for: pausedBackup, asOf: self.now))
+                    reopened.updatedAt = self.now
+                    reopened.updatedBy = self.currentUserId
+                    self.events[idx] = reopened
+                    self.enqueueEventOutbox(reopened, operation: .upsert)
+                }
+                self.activePump = pausedBackup
+                self.persistState()
+                self.triggerBackgroundFlush()
+                self.reschedulePumpNotifications()
+            }
+            return completed
+        }
+
+        // Legacy fallback when `activePump` existed without a backing open-ended event
         let pausedBackup = ActivePumpSession(
+            eventId: nil,
             startedAt: session.startedAt,
             leftAccumulatedSeconds: elapsed.left,
             rightAccumulatedSeconds: elapsed.right,
@@ -2060,12 +2463,94 @@ public final class BlythesLifeStore {
             sessionAccumulatedSeconds: elapsed.session,
             sessionSegmentStartedAt: nil
         )
+        let event = makeEvent(
+            type: .pump,
+            startedAt: session.startedAt,
+            endedAt: max(now, session.startedAt),
+            notes: trimmedNonEmpty(notes),
+            metadata: .pump(completedMetadata)
+        )
+
         activePump = nil
-        persistState()
-        showToast("Pump timer discarded") { [weak self] in
+        appendEvents([event])
+        reschedulePumpNotifications()
+        showToast(toastMessage) { [weak self] in
             guard let self else { return }
+            self.removeNewlyCreatedEvents(ids: [event.id])
             self.activePump = pausedBackup
             self.persistState()
+            self.reschedulePumpNotifications()
+        }
+        return event
+    }
+
+    public func discardPumpTimer() {
+        guard let session = activePump else { return }
+        let elapsed = session.elapsedSeconds(asOf: now)
+
+        let backingIndex: Int? = {
+            if let eventId = session.eventId,
+               let idx = events.firstIndex(where: { $0.id == eventId })
+            {
+                return idx
+            }
+            return latestOpenPumpEventIndex()
+        }()
+        let backedSnapshot = backingIndex.map { events[$0] }
+
+        let pausedBackup = ActivePumpSession(
+            eventId: backedSnapshot?.id ?? session.eventId,
+            startedAt: session.startedAt,
+            leftAccumulatedSeconds: elapsed.left,
+            rightAccumulatedSeconds: elapsed.right,
+            leftSegmentStartedAt: nil,
+            rightSegmentStartedAt: nil,
+            sessionAccumulatedSeconds: elapsed.session,
+            sessionSegmentStartedAt: nil
+        )
+
+        activePump = nil
+
+        if let idx = backingIndex {
+            let targetId = events[idx].id
+            if hasLiveSession {
+                var softDeleted = events[idx]
+                softDeleted.deletedAt = now
+                softDeleted.updatedAt = now
+                softDeleted.updatedBy = currentUserId
+                events[idx] = softDeleted
+                enqueueEventOutbox(softDeleted, operation: .delete)
+                persistState()
+                triggerBackgroundFlush()
+            } else {
+                removeNewlyCreatedEvents(ids: [targetId])
+            }
+        } else {
+            persistState()
+        }
+        reschedulePumpNotifications()
+
+        showToast("Pump timer discarded") { [weak self] in
+            guard let self else { return }
+            if let snapshot = backedSnapshot {
+                var restored = snapshot
+                restored.startedAt = session.startedAt
+                restored.endedAt = nil
+                restored.deletedAt = nil
+                restored.metadata = .pump(self.makeLivePumpMetadata(for: pausedBackup, asOf: self.now))
+                restored.updatedAt = self.now
+                restored.updatedBy = self.currentUserId
+                if let idx = self.events.firstIndex(where: { $0.id == restored.id }) {
+                    self.events[idx] = restored
+                } else {
+                    self.events.append(restored)
+                }
+                self.enqueueEventOutbox(restored, operation: .upsert)
+            }
+            self.activePump = pausedBackup
+            self.persistState()
+            self.triggerBackgroundFlush()
+            self.reschedulePumpNotifications()
         }
     }
 
@@ -2336,6 +2821,7 @@ public final class BlythesLifeStore {
     public func updateEvent(_ updated: EventDTO) {
         guard let index = events.firstIndex(where: { $0.id == updated.id }) else { return }
         let previous = events[index]
+        let affectsPump = (previous.eventType == .pump || updated.eventType == .pump)
         var stamped = updated
         stamped.updatedAt = now
         stamped.updatedBy = currentUserId
@@ -2344,6 +2830,9 @@ public final class BlythesLifeStore {
         enqueueEventOutbox(stamped, operation: .upsert)
         persistState()
         triggerBackgroundFlush()
+        if affectsPump {
+            reschedulePumpNotifications()
+        }
 
         let title = eventTitle(for: stamped)
         showToast("\(title) updated") { [weak self] in
@@ -2355,12 +2844,16 @@ public final class BlythesLifeStore {
             self.enqueueEventOutbox(restored, operation: .upsert)
             self.persistState()
             self.triggerBackgroundFlush()
+            if affectsPump {
+                self.reschedulePumpNotifications()
+            }
         }
     }
 
     public func deleteEvent(_ event: EventDTO) {
         guard let index = events.firstIndex(where: { $0.id == event.id }) else { return }
         let previous = events[index]
+        let affectsPump = (previous.eventType == .pump)
         let title = eventTitle(for: previous)
 
         var softDeleted = previous
@@ -2372,6 +2865,9 @@ public final class BlythesLifeStore {
         enqueueEventOutbox(softDeleted, operation: .delete)
         persistState()
         triggerBackgroundFlush()
+        if affectsPump {
+            reschedulePumpNotifications()
+        }
 
         showToast("\(title) deleted") { [weak self] in
             guard let self, let idx = self.events.firstIndex(where: { $0.id == previous.id }) else { return }
@@ -2383,6 +2879,9 @@ public final class BlythesLifeStore {
             self.enqueueEventOutbox(restored, operation: .upsert)
             self.persistState()
             self.triggerBackgroundFlush()
+            if affectsPump {
+                self.reschedulePumpNotifications()
+            }
         }
     }
 
@@ -3741,6 +4240,10 @@ public final class BlythesLifeStore {
         syncStatus = .localOnly
         lastSyncError = nil
         now = currentNow
+        pumpNotificationSettings = PumpNotificationSettings()
+        notificationSyncTask?.cancel()
+        notificationSyncTask = nil
+        await notificationScheduler.cancelAll()
         persistState()
         showToast("Signed out on this device", undo: nil)
     }
@@ -3784,6 +4287,10 @@ public final class BlythesLifeStore {
         syncStatus = .localOnly
         lastSyncError = nil
         now = currentNow
+        pumpNotificationSettings = PumpNotificationSettings()
+        notificationSyncTask?.cancel()
+        notificationSyncTask = nil
+        await notificationScheduler.cancelAll()
         persistState()
         showToast("Account deleted", undo: nil)
     }
@@ -3792,6 +4299,78 @@ public final class BlythesLifeStore {
     public func checkBackendHealth() async -> BackendHealthResponse? {
         guard let apiClient else { return nil }
         return try? await apiClient.fetchHealth()
+    }
+
+    // MARK: - Pump Reminders & Local Notifications
+
+    /// Timestamp of the latest completed pump session (`endedAt ?? startedAt`), ignoring open live pump timers.
+    public var lastCompletedPumpAt: Date? {
+        activeEvents
+            .filter { $0.eventType == .pump && !$0.isOpenLiveTimer }
+            .map { $0.endedAt ?? $0.startedAt }
+            .max()
+    }
+
+    /// Planned next local reminder date after `lastCompletedPumpAt`, honoring quiet hours and suppressing while pumping.
+    public var nextScheduledPumpReminderDate: Date? {
+        PumpNotificationPlanner.nextReminderDate(
+            lastCompletedPumpAt: lastCompletedPumpAt,
+            activePump: activePump,
+            settings: pumpNotificationSettings,
+            now: now,
+            calendar: profileCalendar
+        )
+    }
+
+    /// Planned local alert date when an active, running pump timer hits `pumpNotificationSettings.timerAlertMinutes`.
+    public var nextScheduledPumpTimerAlertDate: Date? {
+        PumpNotificationPlanner.nextTimerAlertDate(
+            activePump: activePump,
+            settings: pumpNotificationSettings,
+            now: now
+        )
+    }
+
+    public func refreshPumpNotificationAuthorization() async {
+        pumpNotificationAuthStatus = await notificationScheduler.authorizationStatus()
+    }
+
+    public func updatePumpNotificationSettings(_ updated: PumpNotificationSettings) async {
+        var next = updated
+        if next.isEnabled && !pumpNotificationSettings.isEnabled {
+            let granted = await notificationScheduler.requestAuthorization()
+            pumpNotificationAuthStatus = await notificationScheduler.authorizationStatus()
+            if !granted {
+                next.isEnabled = false
+            }
+        } else {
+            pumpNotificationAuthStatus = await notificationScheduler.authorizationStatus()
+        }
+
+        pumpNotificationSettings = next
+        persistState()
+        await syncPumpNotificationsAsync()
+    }
+
+    public func syncPumpNotificationsAsync() async {
+        guard pumpNotificationSettings.isEnabled else {
+            await notificationScheduler.cancelAll()
+            return
+        }
+        await notificationScheduler.syncNotifications(
+            nextReminderDate: nextScheduledPumpReminderDate,
+            timerAlertDate: nextScheduledPumpTimerAlertDate,
+            timerAlertMinutes: pumpNotificationSettings.timerAlertMinutes,
+            childName: profile.displayName
+        )
+    }
+
+    public func reschedulePumpNotifications() {
+        notificationSyncTask?.cancel()
+        notificationSyncTask = Task { [weak self] in
+            guard let self else { return }
+            await self.syncPumpNotificationsAsync()
+        }
     }
 
     // MARK: - Settings & Preferences
@@ -3870,6 +4449,12 @@ public final class BlythesLifeStore {
         syncStatus = .localOnly
         lastSyncError = nil
         now = currentNow
+        pumpNotificationSettings = PumpNotificationSettings()
+        notificationSyncTask?.cancel()
+        let scheduler = notificationScheduler
+        notificationSyncTask = Task {
+            await scheduler.cancelAll()
+        }
         persistState()
         showToast("Signed out on this device", undo: nil)
     }
@@ -4036,11 +4621,12 @@ public final class BlythesLifeStore {
                 }
             }
 
-            reconcileActiveNapFromEvents()
+            reconcileActiveTimersFromEvents()
             lastSyncError = nil
             let effectiveWatermark = serverWatermark ?? now
             syncStatus = outbox.isEmpty ? .synced(effectiveWatermark) : .offline(pendingCount: outbox.count)
             persistState()
+            reschedulePumpNotifications()
         } catch BackendAPIError.unauthorized {
             lastSyncError = "Session expired. Sign in again."
         } catch {
@@ -4209,13 +4795,14 @@ public final class BlythesLifeStore {
         lastSyncError = message
         syncStatus = .error(message)
         persistState()
+        reschedulePumpNotifications()
     }
 
     // MARK: - Internal Helpers
 
     private func latestOpenSleepEvent() -> EventDTO? {
         activeEvents
-            .filter { $0.profileId == profile.id && $0.eventType == .sleep && $0.endedAt == nil }
+            .filter { $0.profileId == profile.id && $0.eventType == .sleep && $0.isOpenLiveTimer }
             .max { lhs, rhs in
                 if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
                 return lhs.updatedAt < rhs.updatedAt
@@ -4227,12 +4814,145 @@ public final class BlythesLifeStore {
         return events.firstIndex(where: { $0.id == target.id })
     }
 
-    private func reconcileActiveNapFromEvents() {
+    private func latestOpenNursingEvent() -> EventDTO? {
+        activeEvents
+            .filter { $0.profileId == profile.id && $0.eventType == .feeding && $0.isOpenLiveTimer }
+            .max { lhs, rhs in
+                if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
+                return lhs.updatedAt < rhs.updatedAt
+            }
+    }
+
+    private func latestOpenNursingEventIndex() -> Int? {
+        guard let target = latestOpenNursingEvent() else { return nil }
+        return events.firstIndex(where: { $0.id == target.id })
+    }
+
+    private func latestOpenPumpEvent() -> EventDTO? {
+        activeEvents
+            .filter { $0.profileId == profile.id && $0.eventType == .pump && $0.isOpenLiveTimer }
+            .max { lhs, rhs in
+                if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
+                return lhs.updatedAt < rhs.updatedAt
+            }
+    }
+
+    private func latestOpenPumpEventIndex() -> Int? {
+        guard let target = latestOpenPumpEvent() else { return nil }
+        return events.firstIndex(where: { $0.id == target.id })
+    }
+
+    private func reconcileActiveTimersFromEvents() {
+        // 1. Sleep / Nap live timer
         if let openSleep = latestOpenSleepEvent() {
             activeNapStart = openSleep.startedAt
         } else {
             activeNapStart = nil
         }
+
+        // 2. Nursing live timer
+        if let openNursing = latestOpenNursingEvent(),
+           case .feeding(let meta) = openNursing.metadata
+        {
+            activeNursing = ActiveNursingSession(
+                eventId: openNursing.id,
+                startedAt: openNursing.startedAt,
+                leftAccumulatedSeconds: TimeInterval(meta.leftDurationSeconds ?? 0),
+                rightAccumulatedSeconds: TimeInterval(meta.rightDurationSeconds ?? 0),
+                activeSide: meta.activeSide,
+                activeSegmentStartedAt: meta.activeSegmentStartedAt,
+                lastActiveSide: meta.lastSide ?? meta.activeSide
+            )
+        } else if activeNursing?.eventId != nil {
+            activeNursing = nil
+        }
+
+        // 3. Pump live timer
+        if let openPump = latestOpenPumpEvent(),
+           case .pump(let meta) = openPump.metadata
+        {
+            activePump = ActivePumpSession(
+                eventId: openPump.id,
+                startedAt: openPump.startedAt,
+                leftAccumulatedSeconds: TimeInterval(meta.leftDurationSeconds ?? 0),
+                rightAccumulatedSeconds: TimeInterval(meta.rightDurationSeconds ?? 0),
+                leftSegmentStartedAt: meta.leftSegmentStartedAt,
+                rightSegmentStartedAt: meta.rightSegmentStartedAt,
+                sessionAccumulatedSeconds: TimeInterval(meta.sessionAccumulatedSeconds ?? 0),
+                sessionSegmentStartedAt: meta.sessionSegmentStartedAt
+            )
+        } else if activePump?.eventId != nil {
+            activePump = nil
+        }
+    }
+
+    private func derivedNursingSide(
+        leftSeconds: TimeInterval,
+        rightSeconds: TimeInterval,
+        activeSide: BreastSide?,
+        lastSide: BreastSide?
+    ) -> BreastSide {
+        let hasLeft = leftSeconds > 0 || activeSide == .left
+        let hasRight = rightSeconds > 0 || activeSide == .right
+        if hasLeft && hasRight { return .both }
+        if hasLeft { return .left }
+        if hasRight { return .right }
+        return lastSide ?? activeSide ?? .left
+    }
+
+    private func makeLivePumpMetadata(for session: ActivePumpSession, asOf date: Date) -> PumpMetadata {
+        PumpMetadata(
+            amountMl: nil,
+            displayUnit: preferredUnit,
+            side: session.derivedSide(asOf: date),
+            durationMinutes: nil,
+            leftAmountMl: nil,
+            rightAmountMl: nil,
+            leftDurationSeconds: Int(session.leftAccumulatedSeconds.rounded()),
+            rightDurationSeconds: Int(session.rightAccumulatedSeconds.rounded()),
+            isTimerActive: true,
+            leftSegmentStartedAt: session.leftSegmentStartedAt,
+            rightSegmentStartedAt: session.rightSegmentStartedAt,
+            sessionAccumulatedSeconds: Int(session.sessionAccumulatedSeconds.rounded()),
+            sessionSegmentStartedAt: session.sessionSegmentStartedAt
+        )
+    }
+
+    private func upsertLivePumpEvent(for session: ActivePumpSession) -> UUID {
+        let liveMeta = makeLivePumpMetadata(for: session, asOf: now)
+        if let existingId = session.eventId,
+           let idx = events.firstIndex(where: { $0.id == existingId && $0.deletedAt == nil })
+        {
+            var updated = events[idx]
+            updated.startedAt = session.startedAt
+            updated.endedAt = nil
+            updated.metadata = .pump(liveMeta)
+            updated.updatedAt = now
+            updated.updatedBy = currentUserId
+            events[idx] = updated
+            enqueueEventOutbox(updated, operation: .upsert)
+            return updated.id
+        }
+        if let idx = latestOpenPumpEventIndex() {
+            var updated = events[idx]
+            updated.startedAt = session.startedAt
+            updated.endedAt = nil
+            updated.metadata = .pump(liveMeta)
+            updated.updatedAt = now
+            updated.updatedBy = currentUserId
+            events[idx] = updated
+            enqueueEventOutbox(updated, operation: .upsert)
+            return updated.id
+        }
+        let openEvent = makeEvent(
+            type: .pump,
+            startedAt: session.startedAt,
+            endedAt: nil,
+            metadata: .pump(liveMeta)
+        )
+        events.append(openEvent)
+        enqueueEventOutbox(openEvent, operation: .upsert)
+        return openEvent.id
     }
 
     private func makeTimeOfDay(
@@ -4284,7 +5004,11 @@ public final class BlythesLifeStore {
     }
 
     private func commitNewEvents(_ newEvents: [EventDTO], toastMessage: String) {
+        let affectsPump = newEvents.contains(where: { $0.eventType == .pump })
         appendEvents(newEvents)
+        if affectsPump {
+            reschedulePumpNotifications()
+        }
         let ids = Set(newEvents.map(\.id))
         showToast(toastMessage) { [weak self] in
             self?.removeNewlyCreatedEvents(ids: ids)
@@ -4301,9 +5025,13 @@ public final class BlythesLifeStore {
     }
 
     private func removeNewlyCreatedEvents(ids: Set<UUID>) {
+        let affectsPump = events.contains(where: { ids.contains($0.id) && $0.eventType == .pump })
         events.removeAll { ids.contains($0.id) }
         outbox.removeAll { $0.entityKind == .event && ids.contains($0.entityId) }
         persistState()
+        if affectsPump {
+            reschedulePumpNotifications()
+        }
     }
 
     private func mergeRemoteEvents(_ remoteEvents: [EventDTO]) {
@@ -4362,7 +5090,8 @@ public final class BlythesLifeStore {
             isSignedInWithApple: isSignedInWithApple,
             hasCompletedHouseholdSetup: hasCompletedHouseholdSetup,
             isDemoPreview: isDemoPreview,
-            pendingJoinRequest: pendingJoinRequest
+            pendingJoinRequest: pendingJoinRequest,
+            pumpNotificationSettings: pumpNotificationSettings
         )
         do {
             try storage.save(snapshot)

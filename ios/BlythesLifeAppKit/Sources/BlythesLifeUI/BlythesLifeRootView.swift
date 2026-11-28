@@ -92,7 +92,9 @@ public struct BlythesLifeRootView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 Task { @MainActor in
+                    await store.refreshPumpNotificationAuthorization()
                     await store.resumeLiveSession()
+                    await store.syncPumpNotificationsAsync()
                 }
             }
         }
@@ -250,6 +252,14 @@ private struct BlythesLifeRootShell: View {
                 activeSheet = nil
                 reviewingSheet = nil
                 selectedTab = .today
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("BlythesLifeOpenLogSheet"))) { notification in
+            guard store.sessionStage == .ready else { return }
+            if (notification.userInfo?["kind"] as? String) == "pump" {
+                reviewingSheet = nil
+                selectedTab = .today
+                openLogSheet(.pump)
             }
         }
         .animation(

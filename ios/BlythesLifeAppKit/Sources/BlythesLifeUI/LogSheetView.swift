@@ -2224,7 +2224,7 @@ private struct LivePumpTimerSection: View {
                     }
                 )
 
-                Text("Runs while you close this.")
+                Text("Runs on every device. You can close this.")
                     .blTextRole(.callout)
                     .foregroundStyle(theme.textSecondary)
             } else {

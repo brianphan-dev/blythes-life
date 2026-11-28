@@ -131,6 +131,9 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
     public var leftDurationSeconds: Int?
     public var rightDurationSeconds: Int?
     public var lastSide: BreastSide?
+    public var isTimerActive: Bool?
+    public var activeSide: BreastSide?
+    public var activeSegmentStartedAt: Date?
 
     public init(
         method: FeedingMethod = .bottle,
@@ -141,7 +144,10 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         durationMinutes: Double? = nil,
         leftDurationSeconds: Int? = nil,
         rightDurationSeconds: Int? = nil,
-        lastSide: BreastSide? = nil
+        lastSide: BreastSide? = nil,
+        isTimerActive: Bool? = nil,
+        activeSide: BreastSide? = nil,
+        activeSegmentStartedAt: Date? = nil
     ) {
         self.method = method
         self.substance = substance
@@ -152,6 +158,9 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         self.leftDurationSeconds = leftDurationSeconds
         self.rightDurationSeconds = rightDurationSeconds
         self.lastSide = lastSide
+        self.isTimerActive = isTimerActive
+        self.activeSide = activeSide
+        self.activeSegmentStartedAt = activeSegmentStartedAt
     }
 
     public init(
@@ -168,6 +177,9 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         self.leftDurationSeconds = nil
         self.rightDurationSeconds = nil
         self.lastSide = nil
+        self.isTimerActive = nil
+        self.activeSide = nil
+        self.activeSegmentStartedAt = nil
     }
 
     public var amountOz: Double? {
@@ -184,6 +196,9 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         case leftDurationSeconds = "left_duration_seconds"
         case rightDurationSeconds = "right_duration_seconds"
         case lastSide = "last_side"
+        case isTimerActive = "is_timer_active"
+        case activeSide = "active_side"
+        case activeSegmentStartedAt = "active_segment_started_at"
     }
 
     public init(from decoder: Decoder) throws {
@@ -197,6 +212,9 @@ public struct FeedingMetadata: Codable, Sendable, Equatable, Hashable {
         self.leftDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .leftDurationSeconds)
         self.rightDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .rightDurationSeconds)
         self.lastSide = try container.decodeIfPresent(BreastSide.self, forKey: .lastSide)
+        self.isTimerActive = try container.decodeIfPresent(Bool.self, forKey: .isTimerActive)
+        self.activeSide = try container.decodeIfPresent(BreastSide.self, forKey: .activeSide)
+        self.activeSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .activeSegmentStartedAt)
     }
 }
 
@@ -209,6 +227,11 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
     public var rightAmountMl: Double?
     public var leftDurationSeconds: Int?
     public var rightDurationSeconds: Int?
+    public var isTimerActive: Bool?
+    public var leftSegmentStartedAt: Date?
+    public var rightSegmentStartedAt: Date?
+    public var sessionAccumulatedSeconds: Int?
+    public var sessionSegmentStartedAt: Date?
 
     public init(
         amountMl: Double? = nil,
@@ -218,7 +241,12 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         leftAmountMl: Double? = nil,
         rightAmountMl: Double? = nil,
         leftDurationSeconds: Int? = nil,
-        rightDurationSeconds: Int? = nil
+        rightDurationSeconds: Int? = nil,
+        isTimerActive: Bool? = nil,
+        leftSegmentStartedAt: Date? = nil,
+        rightSegmentStartedAt: Date? = nil,
+        sessionAccumulatedSeconds: Int? = nil,
+        sessionSegmentStartedAt: Date? = nil
     ) {
         self.amountMl = amountMl
         self.displayUnit = displayUnit
@@ -228,6 +256,11 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         self.rightAmountMl = rightAmountMl
         self.leftDurationSeconds = leftDurationSeconds
         self.rightDurationSeconds = rightDurationSeconds
+        self.isTimerActive = isTimerActive
+        self.leftSegmentStartedAt = leftSegmentStartedAt
+        self.rightSegmentStartedAt = rightSegmentStartedAt
+        self.sessionAccumulatedSeconds = sessionAccumulatedSeconds
+        self.sessionSegmentStartedAt = sessionSegmentStartedAt
     }
 
     public init(
@@ -237,7 +270,12 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         leftAmountOz: Double? = nil,
         rightAmountOz: Double? = nil,
         leftDurationSeconds: Int? = nil,
-        rightDurationSeconds: Int? = nil
+        rightDurationSeconds: Int? = nil,
+        isTimerActive: Bool? = nil,
+        leftSegmentStartedAt: Date? = nil,
+        rightSegmentStartedAt: Date? = nil,
+        sessionAccumulatedSeconds: Int? = nil,
+        sessionSegmentStartedAt: Date? = nil
     ) {
         self.amountMl = UnitConversion.ozToMl(amountOz)
         self.displayUnit = .oz
@@ -247,6 +285,11 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         self.rightAmountMl = rightAmountOz.map(UnitConversion.ozToMl)
         self.leftDurationSeconds = leftDurationSeconds
         self.rightDurationSeconds = rightDurationSeconds
+        self.isTimerActive = isTimerActive
+        self.leftSegmentStartedAt = leftSegmentStartedAt
+        self.rightSegmentStartedAt = rightSegmentStartedAt
+        self.sessionAccumulatedSeconds = sessionAccumulatedSeconds
+        self.sessionSegmentStartedAt = sessionSegmentStartedAt
     }
 
     public var amountOz: Double? {
@@ -270,6 +313,11 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         case rightAmountMl = "right_amount_ml"
         case leftDurationSeconds = "left_duration_seconds"
         case rightDurationSeconds = "right_duration_seconds"
+        case isTimerActive = "is_timer_active"
+        case leftSegmentStartedAt = "left_segment_started_at"
+        case rightSegmentStartedAt = "right_segment_started_at"
+        case sessionAccumulatedSeconds = "session_accumulated_seconds"
+        case sessionSegmentStartedAt = "session_segment_started_at"
     }
 
     public init(from decoder: Decoder) throws {
@@ -282,6 +330,11 @@ public struct PumpMetadata: Codable, Sendable, Equatable, Hashable {
         self.rightAmountMl = try container.decodeIfPresent(Double.self, forKey: .rightAmountMl)
         self.leftDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .leftDurationSeconds)
         self.rightDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .rightDurationSeconds)
+        self.isTimerActive = try container.decodeIfPresent(Bool.self, forKey: .isTimerActive)
+        self.leftSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .leftSegmentStartedAt)
+        self.rightSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .rightSegmentStartedAt)
+        self.sessionAccumulatedSeconds = try container.decodeIfPresent(Int.self, forKey: .sessionAccumulatedSeconds)
+        self.sessionSegmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .sessionSegmentStartedAt)
     }
 }
 
@@ -413,9 +466,15 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
         case substance
         case side
         case lastSide = "last_side"
+        case activeSide = "active_side"
+        case activeSegmentStartedAt = "active_segment_started_at"
         case amountMl = "amount_ml"
         case leftAmountMl = "left_amount_ml"
         case rightAmountMl = "right_amount_ml"
+        case leftSegmentStartedAt = "left_segment_started_at"
+        case rightSegmentStartedAt = "right_segment_started_at"
+        case sessionAccumulatedSeconds = "session_accumulated_seconds"
+        case sessionSegmentStartedAt = "session_segment_started_at"
         case displayUnit = "display_unit"
         case peeSize = "pee_size"
         case poopSize = "poop_size"
@@ -434,9 +493,21 @@ public enum EventMetadata: Codable, Sendable, Equatable, Hashable {
 
         if container.contains(.sleepType) {
             self = .sleep(try SleepMetadata(from: decoder))
-        } else if container.contains(.method) || container.contains(.substance) || container.contains(.lastSide) {
+        } else if container.contains(.method)
+            || container.contains(.substance)
+            || container.contains(.lastSide)
+            || container.contains(.activeSide)
+            || container.contains(.activeSegmentStartedAt)
+        {
             self = .feeding(try FeedingMetadata(from: decoder))
-        } else if container.contains(.side) || container.contains(.leftAmountMl) || container.contains(.rightAmountMl) {
+        } else if container.contains(.side)
+            || container.contains(.leftAmountMl)
+            || container.contains(.rightAmountMl)
+            || container.contains(.leftSegmentStartedAt)
+            || container.contains(.rightSegmentStartedAt)
+            || container.contains(.sessionAccumulatedSeconds)
+            || container.contains(.sessionSegmentStartedAt)
+        {
             self = .pump(try PumpMetadata(from: decoder))
         } else if container.contains(.amountMl) || container.contains(.displayUnit) {
             self = .feeding(try FeedingMetadata(from: decoder))
@@ -640,5 +711,21 @@ public struct EventDTO: Codable, Sendable, Identifiable, Equatable, Hashable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
+    }
+
+    /// True when this event represents an in-progress live household timer (sleep, nursing, or pump)
+    /// that has not yet been completed or deleted.
+    public var isOpenLiveTimer: Bool {
+        guard deletedAt == nil, endedAt == nil else { return false }
+        switch metadata {
+        case .sleep:
+            return true
+        case .feeding(let meta):
+            return meta.method == .breast && meta.isTimerActive == true
+        case .pump(let meta):
+            return meta.isTimerActive == true
+        default:
+            return false
+        }
     }
 }

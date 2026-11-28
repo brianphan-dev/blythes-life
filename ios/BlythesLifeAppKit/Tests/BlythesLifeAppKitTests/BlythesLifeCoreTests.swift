@@ -1938,10 +1938,12 @@ struct BlythesLifeStoreTests {
         #expect(restoredAfterDiscard.sessionSegmentStartedAt == nil)
 
         // Finish WITH combined volume -> logs event + toast + Undo restores paused session
-        let beforeCount = store.activeEvents.count
+        let beforeTodayCount = store.todayEvents.count
+        let backingPumpEventId = try #require(restoredAfterDiscard.eventId)
         let savedWithVolume = try #require(store.finishPumpTimer(amount: 4, unit: .oz, notes: "Morning pump"))
         #expect(store.activePump == nil)
-        #expect(store.activeEvents.count == beforeCount + 1)
+        #expect(savedWithVolume.id == backingPumpEventId)
+        #expect(store.todayEvents.count == beforeTodayCount + 1)
         #expect(store.toast?.message == "Pump logged · 4 oz · 15m")
         #expect(savedWithVolume.endedAt == t0.addingTimeInterval(25 * 60))
         if case .pump(let meta) = savedWithVolume.metadata {
@@ -1951,6 +1953,7 @@ struct BlythesLifeStoreTests {
             #expect(meta.rightDurationSeconds == 900)
             #expect(meta.leftAmountMl == nil)
             #expect(meta.rightAmountMl == nil)
+            #expect(meta.isTimerActive == nil)
             #expect(abs((meta.amountOz ?? 0) - 4.0) < 0.01)
         } else {
             Issue.record("Expected pump metadata")
@@ -1961,10 +1964,11 @@ struct BlythesLifeStoreTests {
         let csvWithPausedPump = store.exportPediatricianCSVString()
         #expect(csvWithPausedPump.contains("4 oz · 15m · Both sides,15m,Morning pump"))
 
-        // Undo finish restores paused activePump and removes event
+        // Undo finish restores paused activePump and re-opens the backing event (removing it from todayEvents)
         store.undoLastToast()
-        #expect(store.activeEvents.count == beforeCount)
+        #expect(store.todayEvents.count == beforeTodayCount)
         #expect(store.activePump?.isRunning == false)
+        #expect(store.activePump?.eventId == backingPumpEventId)
         #expect(store.activePump?.leftAccumulatedSeconds == 900)
         #expect(store.activePump?.rightAccumulatedSeconds == 900)
         #expect(store.activePump?.sessionAccumulatedSeconds == 900)
@@ -2609,6 +2613,148 @@ struct BlythesLifeStoreTests {
         await expiredStore.pullFromServer()
         #expect(expiredStore.sessionStage == .signedOut)
         #expect(expiredStore.activePump == nil)
+    }
+
+    @Test("Open live sleep, nursing, and pump timers are excluded from todayEvents, lastNursingSideInfo, lastCompletedPumpAt, and pediatrician CSV")
+    func openLiveTimersExcludedFromTodayNursingInfoAndCSV() throws {
+        let store = BlythesLifeStore.makeDemo()
+        let baseNow = store.now
+        let baselineTodayCount = store.todayEvents.count
+        let baselineCSVLineCount = store.exportPediatricianCSVString().split(separator: "\n").count
+        let baselineLastPump = store.lastCompletedPumpAt
+        #expect(store.lastNursingSideInfo == nil)
+
+        // Start all 3 live timers at once
+        _ = store.toggleNap()
+        store.tapNursingSide(.left)
+        store.togglePumpBoth()
+
+        // All 3 open timer EventDTOs exist in `store.events`
+        let openSleep = store.events.first(where: { $0.eventType == .sleep && $0.isOpenLiveTimer })
+        let openNursing = store.events.first(where: { $0.eventType == .feeding && $0.isOpenLiveTimer })
+        let openPump = store.events.first(where: { $0.eventType == .pump && $0.isOpenLiveTimer })
+        #expect(openSleep != nil)
+        #expect(openNursing != nil)
+        #expect(openPump != nil)
+
+        // None of the 3 open live timers appear in `todayEvents`
+        #expect(store.todayEvents.count == baselineTodayCount)
+        #expect(!store.todayEvents.contains(where: { $0.id == openSleep?.id }))
+        #expect(!store.todayEvents.contains(where: { $0.id == openNursing?.id }))
+        #expect(!store.todayEvents.contains(where: { $0.id == openPump?.id }))
+
+        // Open nursing timer does not pollute `lastNursingSideInfo`; open pump timer does not advance `lastCompletedPumpAt`
+        #expect(store.lastNursingSideInfo == nil)
+        #expect(store.lastCompletedPumpAt == baselineLastPump)
+
+        // Pediatrician CSV excludes all 3 open live timers
+        let csvWithOpenTimers = store.exportPediatricianCSVString()
+        #expect(csvWithOpenTimers.split(separator: "\n").count == baselineCSVLineCount)
+
+        // Meanwhile a manual volume-only pump (endedAt == nil, isTimerActive == nil) IS included everywhere
+        let manualPumpTime = baseNow.addingTimeInterval(60)
+        store.tick(now: manualPumpTime)
+        let manualPump = store.logPump(startedAt: manualPumpTime, amount: 3.5, unit: .oz, side: .both)
+        #expect(manualPump.endedAt == nil)
+        #expect(manualPump.isOpenLiveTimer == false)
+        #expect(store.todayEvents.contains(where: { $0.id == manualPump.id }))
+        #expect(store.lastCompletedPumpAt == manualPumpTime)
+        #expect(store.exportPediatricianCSVString().split(separator: "\n").count == baselineCSVLineCount + 1)
+    }
+
+    @Test("7-day Rhythm aggregates daily & weekly pumped volume totals and includes a live pump mark on Today")
+    func rhythmPumpedVolumeTotalsAndLivePumpMark() throws {
+        let store = BlythesLifeStore.makeDemo()
+        store.events = []
+        let now = makeDate(day: 25, hour: 14, minute: 0)
+        store.tick(now: now)
+
+        // Day -2 (Nov 23): 4.0 oz combined + split L 2.25 oz / R 1.75 oz (= 4.0 oz) -> 8.0 oz total, 2 sessions
+        _ = store.logPump(
+            startedAt: makeDate(day: 23, hour: 9, minute: 0),
+            amount: 4.0,
+            unit: .oz,
+            durationMinutes: 15
+        )
+        _ = store.logPump(
+            startedAt: makeDate(day: 23, hour: 15, minute: 30),
+            unit: .oz,
+            durationMinutes: 18,
+            leftAmount: 2.25,
+            rightAmount: 1.75
+        )
+
+        // Day -1 (Nov 24): duration-only pump (0 volume) + per-side-only mL pump (amountMl == nil, L 60 mL + R 45 mL = 105 mL)
+        _ = store.logPump(
+            startedAt: makeDate(day: 24, hour: 8, minute: 0),
+            amount: 0,
+            unit: .oz,
+            durationMinutes: 12
+        )
+        let perSideOnlyMlPump = EventDTO(
+            id: UUID(),
+            profileId: store.profile.id,
+            eventType: .pump,
+            startedAt: makeDate(day: 24, hour: 16, minute: 0),
+            endedAt: makeDate(day: 24, hour: 16, minute: 15),
+            timezone: store.profile.defaultTimezone,
+            metadata: .pump(
+                PumpMetadata(
+                    amountMl: nil,
+                    displayUnit: .ml,
+                    side: .both,
+                    durationMinutes: 15,
+                    leftAmountMl: 60,
+                    rightAmountMl: 45
+                )
+            ),
+            createdBy: store.currentUserId,
+            updatedBy: store.currentUserId
+        )
+        store.events.append(perSideOnlyMlPump)
+
+        // Today (Nov 25): completed 3.25 oz pump at 10:00 AM + live active pump running 14m starting 14:00
+        _ = store.logPump(
+            startedAt: makeDate(day: 25, hour: 10, minute: 0),
+            amount: 3.25,
+            unit: .oz,
+            durationMinutes: 15
+        )
+        store.togglePumpBoth()
+        store.tick(now: now.addingTimeInterval(14 * 60))
+
+        let days = store.rhythmWeekDays
+        #expect(days.count == 7)
+
+        let nov23 = days[4]
+        let nov24 = days[5]
+        let today = days[6]
+
+        #expect(nov23.pumpCount == 2)
+        #expect(nov23.totalPumpedOz == 8.0)
+        #expect(abs(nov23.totalPumpedMl - ((UnitConversion.ozToMl(8.0) * 10.0).rounded() / 10.0)) < 0.2)
+
+        #expect(nov24.pumpCount == 2)
+        #expect(nov24.totalPumpedMl == 105.0)
+        let expectedNov24Oz = (UnitConversion.mlToOz(105.0) * 100.0).rounded() / 100.0
+        #expect(nov24.totalPumpedOz == expectedNov24Oz)
+
+        // Today: 1 completed (3.25 oz) + 1 live pump mark (0 oz, 14m) — open EventDTO NOT double-counted!
+        #expect(today.pumpCount == 2)
+        #expect(today.totalPumpedOz == 3.25)
+        let liveMarks = today.pumpMarks.filter(\.isLive)
+        #expect(liveMarks.count == 1)
+        #expect(liveMarks[0].id == "live-pump")
+        #expect(liveMarks[0].amountOz == 0)
+        #expect(liveMarks[0].amountMl == 0)
+        #expect(abs((liveMarks[0].durationMinutes ?? 0) - 14.0) < 0.01)
+
+        // Weekly totals
+        #expect(store.rhythmWeekPumpCount == 6)
+        let expectedWeekOz = ((8.0 + expectedNov24Oz + 3.25) * 100.0).rounded() / 100.0
+        #expect(store.rhythmWeekTotalPumpedOz == expectedWeekOz)
+        let expectedWeekMl = ((nov23.totalPumpedMl + 105.0 + today.totalPumpedMl) * 10.0).rounded() / 10.0
+        #expect(store.rhythmWeekTotalPumpedMl == expectedWeekMl)
     }
 }
 
@@ -3383,6 +3529,296 @@ struct LiveBackendIntegrationTests {
         #expect(deviceB.activeNapStart == nil)
         #expect(deviceB.napCardState.mode == .awake)
         #expect(deviceB.todayEvents.contains(where: { $0.id == finishedNap?.id && $0.endedAt == wakeTime }))
+    }
+
+    @Test("Live nursing timer syncs start, side switch, pause, finish, discard, and Undo across Device A and Device B")
+    func crossDeviceLiveNursingSync() async throws {
+        let serverEvents = OSAllocatedUnfairLock<[UUID: EventDTO]>(initialState: [:])
+        let sharedAPI = MockBackendAPI()
+        sharedAPI.state.withLock { state in
+            state.syncPushHandler = { req, _ in
+                serverEvents.withLock { table in
+                    for event in req.events {
+                        table[event.id] = event
+                    }
+                }
+                return SyncPushResponse(
+                    acceptedEventIds: req.events.map(\.id),
+                    acceptedProfileIds: (req.profiles ?? []).map(\.id),
+                    rejected: [],
+                    serverWatermark: makeDate(hour: 13, minute: 30)
+                )
+            }
+            state.syncPullHandler = { _, _, _ in
+                let snapshot = serverEvents.withLock { Array($0.values) }
+                return SyncPullResponse(
+                    events: snapshot,
+                    profiles: [],
+                    serverWatermark: makeDate(hour: 13, minute: 30),
+                    hasMore: false
+                )
+            }
+        }
+
+        let deviceA = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-a")
+        let deviceB = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-b")
+        let t0 = deviceA.now
+        #expect(deviceB.activeNursing == nil)
+
+        // 1. Device A starts Left nursing -> open EventDTO pushed
+        deviceA.tapNursingSide(.left)
+        await deviceA.flushOutbox()
+        let openEvent = try #require(
+            serverEvents.withLock { $0.values.first(where: { $0.eventType == .feeding && $0.isOpenLiveTimer }) }
+        )
+        #expect(deviceA.activeNursing?.eventId == openEvent.id)
+
+        // 2. Device B pulls at +90s -> live running on Left with exact elapsed 90s
+        deviceB.tick(now: t0.addingTimeInterval(90))
+        await deviceB.pullFromServer()
+        let bRunningLeft = try #require(deviceB.activeNursing)
+        #expect(bRunningLeft.eventId == openEvent.id)
+        #expect(bRunningLeft.activeSide == .left)
+        #expect(bRunningLeft.elapsedSeconds(asOf: t0.addingTimeInterval(90)) == (90, 0, 90))
+        #expect(!deviceB.todayEvents.contains(where: { $0.id == openEvent.id }))
+        #expect(deviceB.lastNursingSideInfo == nil)
+
+        // 3. Device A switches to Right at +120s -> flushes
+        deviceA.tick(now: t0.addingTimeInterval(120))
+        deviceA.tapNursingSide(.right)
+        await deviceA.flushOutbox()
+
+        // Device B pulls at +240s -> L=120s, R=120s running on Right
+        deviceB.tick(now: t0.addingTimeInterval(240))
+        await deviceB.pullFromServer()
+        let bRunningRight = try #require(deviceB.activeNursing)
+        #expect(bRunningRight.activeSide == .right)
+        #expect(bRunningRight.lastActiveSide == .right)
+        #expect(bRunningRight.elapsedSeconds(asOf: t0.addingTimeInterval(240)) == (120, 120, 240))
+
+        // 4. Device A pauses Right at +300s -> flushes
+        deviceA.tick(now: t0.addingTimeInterval(300))
+        deviceA.tapNursingSide(.right)
+        await deviceA.flushOutbox()
+
+        // Device B pulls at +360s -> paused with exact L=120s, R=180s
+        deviceB.tick(now: t0.addingTimeInterval(360))
+        await deviceB.pullFromServer()
+        let bPaused = try #require(deviceB.activeNursing)
+        #expect(bPaused.isRunning == false)
+        #expect(bPaused.elapsedSeconds(asOf: t0.addingTimeInterval(360)) == (120, 180, 300))
+
+        // 5. Device A finishes at +360s -> updates SAME EventDTO in-place and clears live timer fields
+        deviceA.tick(now: t0.addingTimeInterval(360))
+        let finished = try #require(deviceA.finishNursing())
+        #expect(finished.id == openEvent.id)
+        #expect(finished.endedAt == t0.addingTimeInterval(360))
+        #expect(finished.isOpenLiveTimer == false)
+        await deviceA.flushOutbox()
+
+        // Device B pulls -> clears activeNursing and surfaces completed feed in todayEvents & lastNursingSideInfo
+        await deviceB.pullFromServer()
+        #expect(deviceB.activeNursing == nil)
+        #expect(deviceB.todayEvents.contains(where: { $0.id == openEvent.id && $0.endedAt == t0.addingTimeInterval(360) }))
+        #expect(deviceB.lastNursingSideInfo?.side == .right)
+
+        // 6. Device A taps Undo -> re-opens SAME EventDTO across sync!
+        deviceA.tick(now: t0.addingTimeInterval(365))
+        deviceA.undoLastToast()
+        #expect(deviceA.activeNursing?.eventId == openEvent.id)
+        await deviceA.flushOutbox()
+
+        deviceB.tick(now: t0.addingTimeInterval(365))
+        await deviceB.pullFromServer()
+        let bReopened = try #require(deviceB.activeNursing)
+        #expect(bReopened.eventId == openEvent.id)
+        #expect(bReopened.isRunning == false)
+        #expect(bReopened.elapsedSeconds(asOf: t0.addingTimeInterval(365)) == (120, 180, 300))
+        #expect(!deviceB.todayEvents.contains(where: { $0.id == openEvent.id }))
+
+        // 7. Device A discards -> soft-deletes open event -> Device B clears activeNursing
+        deviceA.tick(now: t0.addingTimeInterval(370))
+        deviceA.discardNursing()
+        #expect(deviceA.activeNursing == nil)
+        await deviceA.flushOutbox()
+
+        deviceB.tick(now: t0.addingTimeInterval(370))
+        await deviceB.pullFromServer()
+        #expect(deviceB.activeNursing == nil)
+
+        // 8. Device A taps Undo on discard -> restores open paused event -> Device B restores activeNursing
+        deviceA.tick(now: t0.addingTimeInterval(375))
+        deviceA.undoLastToast()
+        await deviceA.flushOutbox()
+
+        deviceB.tick(now: t0.addingTimeInterval(375))
+        await deviceB.pullFromServer()
+        let bRestoredAfterDiscard = try #require(deviceB.activeNursing)
+        #expect(bRestoredAfterDiscard.eventId == openEvent.id)
+        #expect(bRestoredAfterDiscard.isRunning == false)
+        #expect(bRestoredAfterDiscard.elapsedSeconds(asOf: t0.addingTimeInterval(375)) == (120, 180, 300))
+
+        // 9. Legacy local-only ActiveNursingSession (eventId == nil) is preserved when remote has no open nursing timer
+        serverEvents.withLock { $0.removeAll() }
+        let legacyDevice = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-legacy")
+        legacyDevice.activeNursing = ActiveNursingSession(
+            eventId: nil,
+            startedAt: t0,
+            leftAccumulatedSeconds: 90,
+            rightAccumulatedSeconds: 0,
+            activeSide: nil,
+            activeSegmentStartedAt: nil,
+            lastActiveSide: .left
+        )
+        await legacyDevice.pullFromServer()
+        #expect(legacyDevice.activeNursing != nil)
+        #expect(legacyDevice.activeNursing?.eventId == nil)
+        // Next tap upgrades legacy session to a synced open EventDTO!
+        legacyDevice.tapNursingSide(.right)
+        #expect(legacyDevice.activeNursing?.eventId != nil)
+    }
+
+    @Test("Live dual-side pump timer syncs across devices with union-of-active-intervals, Undo, discard, and never misclassifies manual volume-only pumps")
+    func crossDeviceLivePumpSync() async throws {
+        let serverEvents = OSAllocatedUnfairLock<[UUID: EventDTO]>(initialState: [:])
+        let sharedAPI = MockBackendAPI()
+        sharedAPI.state.withLock { state in
+            state.syncPushHandler = { req, _ in
+                serverEvents.withLock { table in
+                    for event in req.events {
+                        table[event.id] = event
+                    }
+                }
+                return SyncPushResponse(
+                    acceptedEventIds: req.events.map(\.id),
+                    acceptedProfileIds: (req.profiles ?? []).map(\.id),
+                    rejected: [],
+                    serverWatermark: makeDate(hour: 13, minute: 45)
+                )
+            }
+            state.syncPullHandler = { _, _, _ in
+                let snapshot = serverEvents.withLock { Array($0.values) }
+                return SyncPullResponse(
+                    events: snapshot,
+                    profiles: [],
+                    serverWatermark: makeDate(hour: 13, minute: 45),
+                    hasMore: false
+                )
+            }
+        }
+
+        let deviceA = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-a")
+        let deviceB = BlythesLifeStore.makeDemo(apiClient: sharedAPI, accessToken: "token-b")
+        let t0 = deviceA.now
+        #expect(deviceB.activePump == nil)
+
+        // 1. Device A starts both sides simultaneously
+        deviceA.togglePumpBoth()
+        await deviceA.flushOutbox()
+        let openPump = try #require(
+            serverEvents.withLock { $0.values.first(where: { $0.eventType == .pump && $0.isOpenLiveTimer }) }
+        )
+        #expect(deviceA.activePump?.eventId == openPump.id)
+
+        // 2. Device B pulls at +5m (300s) -> both sides running, session = 300s (not 600s!)
+        deviceB.tick(now: t0.addingTimeInterval(5 * 60))
+        await deviceB.pullFromServer()
+        let bAt5m = try #require(deviceB.activePump)
+        #expect(bAt5m.eventId == openPump.id)
+        #expect(bAt5m.isBothRunning == true)
+        #expect(bAt5m.elapsedSeconds(asOf: t0.addingTimeInterval(5 * 60)) == (300, 300, 300))
+        #expect(!deviceB.todayEvents.contains(where: { $0.id == openPump.id }))
+
+        // 3. Device A pauses Left at +12m (720s) while Right keeps running
+        deviceA.tick(now: t0.addingTimeInterval(12 * 60))
+        deviceA.tapPumpSide(.left)
+        await deviceA.flushOutbox()
+
+        // Device B pulls at +18m (1080s) -> L=720s, R=1080s, Session=1080s (exact union-of-active-intervals!)
+        deviceB.tick(now: t0.addingTimeInterval(18 * 60))
+        await deviceB.pullFromServer()
+        let bStaggered = try #require(deviceB.activePump)
+        #expect(bStaggered.isLeftRunning == false)
+        #expect(bStaggered.isRightRunning == true)
+        #expect(bStaggered.elapsedSeconds(asOf: t0.addingTimeInterval(18 * 60)) == (720, 1080, 1080))
+
+        // 4. Device A pauses both at +18m (1080s)
+        deviceA.tick(now: t0.addingTimeInterval(18 * 60))
+        deviceA.togglePumpBoth()
+        await deviceA.flushOutbox()
+
+        // Device B pulls at +20m (1200s) -> paused at exact (720, 1080, 1080)
+        deviceB.tick(now: t0.addingTimeInterval(20 * 60))
+        await deviceB.pullFromServer()
+        let bPaused = try #require(deviceB.activePump)
+        #expect(bPaused.isRunning == false)
+        #expect(bPaused.elapsedSeconds(asOf: t0.addingTimeInterval(20 * 60)) == (720, 1080, 1080))
+
+        // 5. Device A finishes with split volume -> updates SAME EventDTO in-place, clears all 5 live-timer fields
+        deviceA.tick(now: t0.addingTimeInterval(20 * 60))
+        let finished = try #require(deviceA.finishPumpTimer(leftAmount: 2.5, rightAmount: 1.5, unit: .oz))
+        #expect(finished.id == openPump.id)
+        #expect(finished.endedAt == t0.addingTimeInterval(20 * 60))
+        #expect(finished.isOpenLiveTimer == false)
+        if case .pump(let meta) = finished.metadata {
+            #expect(meta.isTimerActive == nil)
+            #expect(meta.leftSegmentStartedAt == nil)
+            #expect(meta.rightSegmentStartedAt == nil)
+            #expect(meta.sessionAccumulatedSeconds == nil)
+            #expect(meta.sessionSegmentStartedAt == nil)
+            #expect(meta.durationMinutes == 18)
+        } else {
+            Issue.record("Expected pump metadata")
+        }
+        await deviceA.flushOutbox()
+
+        // Device B pulls -> clears activePump and shows completed pump in todayEvents
+        await deviceB.pullFromServer()
+        #expect(deviceB.activePump == nil)
+        #expect(deviceB.todayEvents.contains(where: { $0.id == openPump.id && $0.endedAt == t0.addingTimeInterval(20 * 60) }))
+
+        // 6. Device A taps Undo -> re-opens SAME EventDTO across sync
+        deviceA.tick(now: t0.addingTimeInterval(20 * 60 + 5))
+        deviceA.undoLastToast()
+        await deviceA.flushOutbox()
+
+        deviceB.tick(now: t0.addingTimeInterval(20 * 60 + 5))
+        await deviceB.pullFromServer()
+        let bReopened = try #require(deviceB.activePump)
+        #expect(bReopened.eventId == openPump.id)
+        #expect(bReopened.isRunning == false)
+        #expect(bReopened.elapsedSeconds(asOf: t0.addingTimeInterval(20 * 60 + 5)) == (720, 1080, 1080))
+
+        // 7. Device A discards -> soft-deletes open pump -> Device B clears activePump
+        deviceA.tick(now: t0.addingTimeInterval(20 * 60 + 10))
+        deviceA.discardPumpTimer()
+        await deviceA.flushOutbox()
+
+        deviceB.tick(now: t0.addingTimeInterval(20 * 60 + 10))
+        await deviceB.pullFromServer()
+        #expect(deviceB.activePump == nil)
+
+        // 8. Manual volume-only pump (endedAt == nil, isTimerActive == nil) is NEVER misclassified as an active timer!
+        let manualVolumeOnlyPump = EventDTO(
+            id: UUID(),
+            profileId: deviceA.profile.id,
+            eventType: .pump,
+            startedAt: t0.addingTimeInterval(25 * 60),
+            endedAt: nil,
+            timezone: deviceA.profile.defaultTimezone,
+            metadata: .pump(PumpMetadata(amountOz: 3.5, side: .both)),
+            createdBy: deviceA.currentUserId,
+            updatedBy: deviceA.currentUserId,
+            createdAt: t0.addingTimeInterval(25 * 60),
+            updatedAt: t0.addingTimeInterval(25 * 60)
+        )
+        #expect(manualVolumeOnlyPump.isOpenLiveTimer == false)
+        serverEvents.withLock { $0[manualVolumeOnlyPump.id] = manualVolumeOnlyPump }
+
+        deviceB.tick(now: t0.addingTimeInterval(30 * 60))
+        await deviceB.pullFromServer()
+        #expect(deviceB.activePump == nil)
+        #expect(deviceB.todayEvents.contains(where: { $0.id == manualVolumeOnlyPump.id }))
     }
 
     @Test("Live paper-scan pipeline compresses, presigns, uploads to R2, extracts drafts + VIT D + ambiguity, and confirms without duplicate sync push")
@@ -4451,5 +4887,401 @@ struct PortabilityAndInfrastructureTests {
 
         let decoded = parser.feed(line: "data: \(jsonString)")
         #expect(decoded == payload)
+    }
+}
+
+// MARK: - Pump Notifications & Planner Tests
+
+private final class MockPumpNotificationScheduler: PumpNotificationScheduling, Sendable {
+    struct SyncCall: Sendable, Equatable {
+        let nextReminderDate: Date?
+        let timerAlertDate: Date?
+        let timerAlertMinutes: Int?
+        let childName: String
+    }
+
+    struct State: Sendable {
+        var authStatus: PumpNotificationAuthorizationStatus = .notDetermined
+        var grantOnRequest: Bool = true
+        var requestAuthCalls: Int = 0
+        var syncCalls: [SyncCall] = []
+        var cancelAllCalls: Int = 0
+    }
+
+    let state = OSAllocatedUnfairLock<State>(initialState: State())
+
+    init(
+        authStatus: PumpNotificationAuthorizationStatus = .notDetermined,
+        grantOnRequest: Bool = true
+    ) {
+        state.withLock {
+            $0.authStatus = authStatus
+            $0.grantOnRequest = grantOnRequest
+        }
+    }
+
+    func authorizationStatus() async -> PumpNotificationAuthorizationStatus {
+        state.withLock { $0.authStatus }
+    }
+
+    func requestAuthorization() async -> Bool {
+        state.withLock { s in
+            s.requestAuthCalls += 1
+            if s.grantOnRequest {
+                s.authStatus = .authorized
+                return true
+            } else {
+                s.authStatus = .denied
+                return false
+            }
+        }
+    }
+
+    func syncNotifications(
+        nextReminderDate: Date?,
+        timerAlertDate: Date?,
+        timerAlertMinutes: Int?,
+        childName: String
+    ) async {
+        state.withLock {
+            $0.syncCalls.append(
+                SyncCall(
+                    nextReminderDate: nextReminderDate,
+                    timerAlertDate: timerAlertDate,
+                    timerAlertMinutes: timerAlertMinutes,
+                    childName: childName
+                )
+            )
+        }
+    }
+
+    func cancelAll() async {
+        state.withLock { $0.cancelAllCalls += 1 }
+    }
+}
+
+@Suite("Pump Notifications & Reminders")
+struct PumpNotificationTests {
+    private var laCalendar: Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: SampleSeedData.defaultTimeZoneIdentifier)!
+        return cal
+    }
+
+    @Test("PumpNotificationPlanner handles interval, quiet-hours overnight & daytime rollover, active-pump suppression, overdue guard, and timer alerts")
+    func pumpNotificationPlannerIntervalQuietHoursAndTimerAlerts() throws {
+        let cal = laCalendar
+
+        // 1. Disabled returns nil
+        let disabled = PumpNotificationSettings(isEnabled: false, intervalMinutes: 180)
+        let tenAM = makeDate(day: 25, hour: 10, minute: 0)
+        #expect(
+            PumpNotificationPlanner.nextReminderDate(
+                lastCompletedPumpAt: tenAM,
+                activePump: nil,
+                settings: disabled,
+                now: makeDate(day: 25, hour: 10, minute: 30),
+                calendar: cal
+            ) == nil
+        )
+
+        // 2. Enabled with no completed pump returns nil
+        let enabled = PumpNotificationSettings(isEnabled: true, intervalMinutes: 180)
+        #expect(
+            PumpNotificationPlanner.nextReminderDate(
+                lastCompletedPumpAt: nil,
+                activePump: nil,
+                settings: enabled,
+                now: makeDate(day: 25, hour: 10, minute: 30),
+                calendar: cal
+            ) == nil
+        )
+
+        // 3. Active pump suppresses next-pump reminder
+        let runningPump = ActivePumpSession(
+            startedAt: makeDate(day: 25, hour: 10, minute: 15),
+            leftSegmentStartedAt: makeDate(day: 25, hour: 10, minute: 15),
+            rightSegmentStartedAt: makeDate(day: 25, hour: 10, minute: 15),
+            sessionSegmentStartedAt: makeDate(day: 25, hour: 10, minute: 15)
+        )
+        #expect(
+            PumpNotificationPlanner.nextReminderDate(
+                lastCompletedPumpAt: tenAM,
+                activePump: runningPump,
+                settings: enabled,
+                now: makeDate(day: 25, hour: 10, minute: 30),
+                calendar: cal
+            ) == nil
+        )
+
+        // 4. Standard 3h interval (10:00 AM -> 1:00 PM)
+        let nextAt1PM = PumpNotificationPlanner.nextReminderDate(
+            lastCompletedPumpAt: tenAM,
+            activePump: nil,
+            settings: enabled,
+            now: makeDate(day: 25, hour: 10, minute: 30),
+            calendar: cal
+        )
+        #expect(nextAt1PM == makeDate(day: 25, hour: 13, minute: 0))
+
+        // 5. Already overdue (target <= now) returns nil so stale notifications do not fire immediately
+        #expect(
+            PumpNotificationPlanner.nextReminderDate(
+                lastCompletedPumpAt: tenAM,
+                activePump: nil,
+                settings: enabled,
+                now: makeDate(day: 25, hour: 13, minute: 0),
+                calendar: cal
+            ) == nil
+        )
+        #expect(
+            PumpNotificationPlanner.nextReminderDate(
+                lastCompletedPumpAt: tenAM,
+                activePump: nil,
+                settings: enabled,
+                now: makeDate(day: 25, hour: 14, minute: 0),
+                calendar: cal
+            ) == nil
+        )
+
+        // 6. Overnight quiet hours (10:00 PM – 6:00 AM, i.e. 1320 -> 360)
+        let quietOvernight = PumpNotificationSettings(
+            isEnabled: true,
+            intervalMinutes: 180,
+            quietHoursEnabled: true,
+            quietStartMinutesFromMidnight: 1320, // 10:00 PM
+            quietEndMinutesFromMidnight: 360 // 6:00 AM
+        )
+        // 8:30 PM + 3h = 11:30 PM -> shifts to 6:00 AM next day (Nov 26)
+        let shiftedFrom1130PM = PumpNotificationPlanner.nextReminderDate(
+            lastCompletedPumpAt: makeDate(day: 25, hour: 20, minute: 30),
+            activePump: nil,
+            settings: quietOvernight,
+            now: makeDate(day: 25, hour: 20, minute: 45),
+            calendar: cal
+        )
+        #expect(shiftedFrom1130PM == makeDate(day: 26, hour: 6, minute: 0))
+
+        // 11:00 PM + 3h = 2:00 AM (Nov 26) -> shifts to 6:00 AM same day (Nov 26)
+        let shiftedFrom2AM = PumpNotificationPlanner.nextReminderDate(
+            lastCompletedPumpAt: makeDate(day: 25, hour: 23, minute: 0),
+            activePump: nil,
+            settings: quietOvernight,
+            now: makeDate(day: 25, hour: 23, minute: 5),
+            calendar: cal
+        )
+        #expect(shiftedFrom2AM == makeDate(day: 26, hour: 6, minute: 0))
+
+        // 3:00 AM + 3h = 6:00 AM exact -> outside [22:00, 06:00), stays 6:00 AM
+        let exactQuietEnd = PumpNotificationPlanner.nextReminderDate(
+            lastCompletedPumpAt: makeDate(day: 26, hour: 3, minute: 0),
+            activePump: nil,
+            settings: quietOvernight,
+            now: makeDate(day: 26, hour: 3, minute: 5),
+            calendar: cal
+        )
+        #expect(exactQuietEnd == makeDate(day: 26, hour: 6, minute: 0))
+
+        // 7. Daytime quiet hours (1:00 PM – 3:00 PM, i.e. 780 -> 900): 11:00 AM + 3h = 2:00 PM -> 3:00 PM same day
+        let quietDaytime = PumpNotificationSettings(
+            isEnabled: true,
+            intervalMinutes: 180,
+            quietHoursEnabled: true,
+            quietStartMinutesFromMidnight: 780,
+            quietEndMinutesFromMidnight: 900
+        )
+        let shiftedDaytime = PumpNotificationPlanner.nextReminderDate(
+            lastCompletedPumpAt: makeDate(day: 25, hour: 11, minute: 0),
+            activePump: nil,
+            settings: quietDaytime,
+            now: makeDate(day: 25, hour: 11, minute: 15),
+            calendar: cal
+        )
+        #expect(shiftedDaytime == makeDate(day: 25, hour: 15, minute: 0))
+
+        // 8. Live timer target alert (`nextTimerAlertDate`)
+        let alertSettings = PumpNotificationSettings(
+            isEnabled: true,
+            intervalMinutes: 180,
+            timerAlertMinutes: 20
+        )
+        let start = makeDate(day: 25, hour: 10, minute: 0)
+        // Running 5m -> 15m left -> fires at 10:20 AM
+        let runningAt5m = ActivePumpSession(
+            startedAt: start,
+            leftSegmentStartedAt: start,
+            rightSegmentStartedAt: start,
+            sessionSegmentStartedAt: start
+        )
+        let alertDate = PumpNotificationPlanner.nextTimerAlertDate(
+            activePump: runningAt5m,
+            settings: alertSettings,
+            now: start.addingTimeInterval(5 * 60)
+        )
+        #expect(alertDate == start.addingTimeInterval(20 * 60))
+
+        // Paused timer returns nil
+        let pausedAt5m = ActivePumpSession(
+            startedAt: start,
+            leftAccumulatedSeconds: 300,
+            rightAccumulatedSeconds: 300,
+            sessionAccumulatedSeconds: 300
+        )
+        #expect(
+            PumpNotificationPlanner.nextTimerAlertDate(
+                activePump: pausedAt5m,
+                settings: alertSettings,
+                now: start.addingTimeInterval(10 * 60)
+            ) == nil
+        )
+
+        // Power-pump resume (10m accumulated + 5m current = 15m elapsed) -> 5m remaining
+        let resumedAt15m = ActivePumpSession(
+            startedAt: start,
+            leftAccumulatedSeconds: 600,
+            rightAccumulatedSeconds: 600,
+            leftSegmentStartedAt: start.addingTimeInterval(20 * 60),
+            rightSegmentStartedAt: start.addingTimeInterval(20 * 60),
+            sessionAccumulatedSeconds: 600,
+            sessionSegmentStartedAt: start.addingTimeInterval(20 * 60)
+        )
+        let resumedNow = start.addingTimeInterval(25 * 60)
+        #expect(
+            PumpNotificationPlanner.nextTimerAlertDate(
+                activePump: resumedAt15m,
+                settings: alertSettings,
+                now: resumedNow
+            ) == resumedNow.addingTimeInterval(5 * 60)
+        )
+
+        // Already reached target (20m elapsed) -> returns nil
+        #expect(
+            PumpNotificationPlanner.nextTimerAlertDate(
+                activePump: runningAt5m,
+                settings: alertSettings,
+                now: start.addingTimeInterval(20 * 60)
+            ) == nil
+        )
+    }
+
+    @Test("BlythesLifeStore enforces honest denied-permission toggle, syncs reminders across pump lifecycle, and cancels on sign-out")
+    @MainActor
+    func pumpNotificationStoreSettingsPermissionsAndSignOut() async throws {
+        // 1. Denied permission keeps `isEnabled == false` and persists honestly
+        let deniedScheduler = MockPumpNotificationScheduler(authStatus: .notDetermined, grantOnRequest: false)
+        let deniedStorage = InMemoryLocalStateStorage(initialState: SampleSeedData.makeDemoState())
+        let deniedStore = BlythesLifeStore(
+            storage: deniedStorage,
+            apiClient: nil,
+            tokenStore: InMemoryAuthTokenStorage(),
+            initialNow: SampleSeedData.defaultReferenceDate,
+            notificationScheduler: deniedScheduler
+        )
+
+        var attempted = PumpNotificationSettings(isEnabled: true, intervalMinutes: 180, timerAlertMinutes: 20)
+        await deniedStore.updatePumpNotificationSettings(attempted)
+        #expect(deniedStore.pumpNotificationAuthStatus == .denied)
+        #expect(deniedStore.pumpNotificationSettings.isEnabled == false)
+        #expect(try deniedStorage.load()?.pumpNotificationSettings.isEnabled == false)
+        #expect(deniedScheduler.state.withLock { $0.requestAuthCalls } == 1)
+        #expect(deniedScheduler.state.withLock { $0.cancelAllCalls } >= 1)
+
+        // 2. Granted permission enables reminders, schedules next reminder, suppresses during active pump, schedules timer alert, and cancels on sign-out
+        let grantedScheduler = MockPumpNotificationScheduler(authStatus: .notDetermined, grantOnRequest: true)
+        let store = BlythesLifeStore.makeDemo(notificationScheduler: grantedScheduler)
+        let t0 = makeDate(day: 25, hour: 12, minute: 0)
+        store.events = []
+        store.tick(now: t0)
+        _ = store.logPump(startedAt: makeDate(day: 25, hour: 10, minute: 0), amount: 4.0, unit: .oz, durationMinutes: 15)
+        // lastCompletedPumpAt == 10:15 AM -> +3h = 1:15 PM
+
+        attempted = PumpNotificationSettings(isEnabled: true, intervalMinutes: 180, timerAlertMinutes: 20)
+        await store.updatePumpNotificationSettings(attempted)
+
+        #expect(store.pumpNotificationAuthStatus == .authorized)
+        #expect(store.pumpNotificationSettings.isEnabled == true)
+        #expect(store.nextScheduledPumpReminderDate == makeDate(day: 25, hour: 13, minute: 15))
+        #expect(store.nextScheduledPumpTimerAlertDate == nil)
+
+        let firstSync = try #require(grantedScheduler.state.withLock { $0.syncCalls.last })
+        #expect(firstSync.nextReminderDate == makeDate(day: 25, hour: 13, minute: 15))
+        #expect(firstSync.timerAlertDate == nil)
+        #expect(firstSync.timerAlertMinutes == 20)
+
+        // Starting pump timer suppresses next-pump reminder and schedules 20m timer alert
+        store.togglePumpBoth()
+        await store.syncPumpNotificationsAsync()
+        #expect(store.nextScheduledPumpReminderDate == nil)
+        #expect(store.nextScheduledPumpTimerAlertDate == t0.addingTimeInterval(20 * 60))
+        let duringPumpSync = try #require(grantedScheduler.state.withLock { $0.syncCalls.last })
+        #expect(duringPumpSync.nextReminderDate == nil)
+        #expect(duringPumpSync.timerAlertDate == t0.addingTimeInterval(20 * 60))
+
+        // Finishing pump timer at 12:15 PM clears timer alert and schedules next reminder for 3:15 PM
+        store.tick(now: t0.addingTimeInterval(15 * 60))
+        _ = store.finishPumpTimer(amount: 4.5, unit: .oz)
+        await store.syncPumpNotificationsAsync()
+        #expect(store.nextScheduledPumpTimerAlertDate == nil)
+        #expect(store.nextScheduledPumpReminderDate == makeDate(day: 25, hour: 15, minute: 15))
+
+        // Sign-out resets pumpNotificationSettings to disabled and calls cancelAll()
+        let cancelsBefore = grantedScheduler.state.withLock { $0.cancelAllCalls }
+        await store.signOutOnThisDeviceAsync()
+        #expect(store.pumpNotificationSettings.isEnabled == false)
+        #expect(grantedScheduler.state.withLock { $0.cancelAllCalls } == cancelsBefore + 1)
+    }
+
+    @Test("PersistedAppState decodes legacy JSON without pumpNotificationSettings/eventId and round-trips new fields cleanly")
+    func pumpNotificationSettingsAndSessionEventIdPersistence() throws {
+        var state = SampleSeedData.makeDemoState()
+        let nursingId = UUID()
+        let pumpId = UUID()
+        let startedAt = makeDate(day: 25, hour: 12, minute: 0)
+
+        state.activeNursingSession = ActiveNursingSession(
+            eventId: nursingId,
+            startedAt: startedAt,
+            leftAccumulatedSeconds: 120,
+            activeSide: .left,
+            activeSegmentStartedAt: startedAt
+        )
+        state.activePumpSession = ActivePumpSession(
+            eventId: pumpId,
+            startedAt: startedAt,
+            leftAccumulatedSeconds: 180,
+            rightAccumulatedSeconds: 180,
+            sessionAccumulatedSeconds: 180
+        )
+        state.pumpNotificationSettings = PumpNotificationSettings(
+            isEnabled: true,
+            intervalMinutes: 210,
+            quietHoursEnabled: true,
+            quietStartMinutesFromMidnight: 1320,
+            quietEndMinutesFromMidnight: 390,
+            timerAlertMinutes: 25
+        )
+
+        let encoded = try BlythesLifeJSONCoding.makeEncoder().encode(state)
+        let roundTripped = try BlythesLifeJSONCoding.makeDecoder().decode(PersistedAppState.self, from: encoded)
+        #expect(roundTripped.activeNursingSession?.eventId == nursingId)
+        #expect(roundTripped.activePumpSession?.eventId == pumpId)
+        #expect(roundTripped.pumpNotificationSettings == state.pumpNotificationSettings)
+
+        // Strip newly added keys to verify backward-compatible decoding of legacy persisted JSON
+        var jsonObj = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        jsonObj.removeValue(forKey: "pumpNotificationSettings")
+        if var nursingObj = jsonObj["activeNursingSession"] as? [String: Any] {
+            nursingObj.removeValue(forKey: "eventId")
+            jsonObj["activeNursingSession"] = nursingObj
+        }
+        if var pumpObj = jsonObj["activePumpSession"] as? [String: Any] {
+            pumpObj.removeValue(forKey: "eventId")
+            jsonObj["activePumpSession"] = pumpObj
+        }
+        let legacyData = try JSONSerialization.data(withJSONObject: jsonObj)
+        let decodedLegacy = try BlythesLifeJSONCoding.makeDecoder().decode(PersistedAppState.self, from: legacyData)
+        #expect(decodedLegacy.pumpNotificationSettings == PumpNotificationSettings())
+        #expect(decodedLegacy.activeNursingSession?.eventId == nil)
+        #expect(decodedLegacy.activePumpSession?.eventId == nil)
     }
 }
